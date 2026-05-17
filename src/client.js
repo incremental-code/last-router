@@ -1,5 +1,5 @@
 import { Signal } from 'signal-polyfill';
-import { createElement, mount, hydrate, onUnmount } from '@incremental-code/last-act';
+import { createElement, mount, hydrate, onUnmount, effect } from '@incremental-code/last-act';
 import { matchPath } from '/__router/common.js';
 
 const data = JSON.parse(document.getElementById('__last_router_data').textContent);
@@ -27,6 +27,7 @@ async function hydrateInitial() {
     const Page = await loadPage(match.route);
     const vnode = createElement(Page, { router, params: match.params, body: currentBody });
     hydrate(vnode, appEl.firstElementChild);
+    attachTitleEffect(currentBody, appEl.firstElementChild);
     streamInto(data.path, appEl.firstElementChild, { skipFirstChunk: true });
 }
 
@@ -79,6 +80,7 @@ async function navigate(target) {
                     mountedNode = mount(vnode);
                     onUnmount(mountedNode, () => controller.abort());
                     appEl.replaceChildren(mountedNode);
+                    attachTitleEffect(currentBody, mountedNode);
                 } else if (currentBody) {
                     mergeIntoSignals(currentBody, chunk);
                 }
@@ -161,6 +163,20 @@ function mergeIntoSignals(signals, chunk) {
         if (signals[k]) signals[k].set(v);
         else signals[k] = new Signal.State(v);
     }
+}
+
+/**
+ * If body has a `head` signal carrying { title, ... }, mirror its title into
+ * document.title. Cleans up when the mounted node unmounts.
+ */
+function attachTitleEffect(body, node) {
+    if (!body.head) return;
+    const stop = effect(() => {
+        const head = body.head.get();
+        const title = head && typeof head.title === 'string' ? head.title : null;
+        if (title) document.title = title;
+    });
+    onUnmount(node, stop);
 }
 
 function interceptLinks(event) {

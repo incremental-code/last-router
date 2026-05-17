@@ -1,3 +1,3 @@
-export default async function slug({ params: { slug } }) {
-    return { greeting: `Hello,`, slug };
+export default async function slug(req) {
+    return { greeting: `Hello,`, slug: req.params.slug };
 }

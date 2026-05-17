@@ -55,11 +55,33 @@ export interface PageProps<P extends Params = Params, B extends Body = Body> {
 export type Page<P extends Params = Params, B extends Body = Body> =
     (props: PageProps<P, B>) => Renderable;
 
-export interface ApiContext<P extends Params = Params, Q extends Query = Query> {
-    router: Router;
-    params: P;
-    query: Q;
+export interface CookieOptions {
+    domain?: string;
+    path?: string;
+    maxAge?: number;
+    expires?: Date;
+    httpOnly?: boolean;
+    secure?: boolean;
+    sameSite?: 'strict' | 'lax' | 'none';
 }
 
-export type Api<B extends Body = Body, P extends Params = Params, Q extends Query = Query> =
-    (ctx: ApiContext<P, Q>) => B | Promise<B> | AsyncIterable<Partial<B>>;
+export interface ApiRequest<P extends Params = Params, Q extends Query = Query, B = unknown> {
+    method: string;
+    path: string;
+    params: P;
+    query: Q;
+    body: B;
+    cookies: Record<string, string>;
+}
+
+export interface ApiResponse {
+    setStatus(code: number): void;
+    setHeader(name: string, value: string): void;
+    setCookie(name: string, value: string, opts?: CookieOptions): void;
+    /** Throws an internal Redirect; control does not return. */
+    redirect(to: string, opts?: { permanent?: boolean }): never;
+}
+
+export type Api<B extends Body = Body, P extends Params = Params, Q extends Query = Query, In = unknown> =
+    (req: ApiRequest<P, Q, In>, res: ApiResponse) =>
+        B | Promise<B> | AsyncIterable<Partial<B>>;

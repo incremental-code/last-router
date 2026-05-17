@@ -38,9 +38,9 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
             if (path === '/__router/common.js') return sendFile(join(HERE, 'common.js'), res);
             if (path.startsWith('/__module/')) return serveUnder(findNodeModules(baseDir), path.slice('/__module/'.length), res);
             if (path.startsWith('/__src/')) return serveUnder(baseDir, path.slice('/__src/'.length), res);
-            if (path.startsWith('/__data')) return streamData(baseDir, path.slice('/__data'.length) || '/', url, res);
+            if (path.startsWith('/__data')) return streamData(baseDir, path.slice('/__data'.length) || '/', url, req, res);
 
-            return renderPage(baseDir, importMap, path, url, res);
+            return renderPage(baseDir, importMap, path, url, req, res);
         } catch (err) {
             console.error(err);
             res.writeHead(500, { 'content-type': 'text/plain' });
@@ -96,12 +96,13 @@ async function loadPage(baseDir, route) {
 }
 
 const SSR_DRAIN_MS = 1000;
+const MAX_BODY_BYTES = 1024 * 1024; // ~1MB cap on parsed request body
 
-async function runApi(apiFn, context) {
+async function runApi(apiFn, req, res) {
     const body = {};
     if (!apiFn) return body;
 
-    const result = apiFn(context);
+    const result = apiFn(req, res);
     if (isAsyncIterable(result)) {
         await drainForSsr(result, body, SSR_DRAIN_MS);
     } else {
@@ -137,7 +138,7 @@ async function drainForSsr(iterable, body, timeoutMs) {
     }
 }
 
-async function renderPage(baseDir, importMap, path, url, res) {
+async function renderPage(baseDir, importMap, path, url, req, res) {
     const routes = await scanRoutes(baseDir);
     const match = matchPath(routes, path);
     if (!match) return notFound(res);
@@ -146,13 +147,30 @@ async function renderPage(baseDir, importMap, path, url, res) {
     const query = parseQuery(url.search);
     const router = serverRouter(path);
 
+    let reqBody;
+    try {
+        reqBody = await readRequestBody(req);
+    } catch (err) {
+        if (err && err.code === 'PAYLOAD_TOO_LARGE') {
+            res.writeHead(413, { 'content-type': 'text/plain' });
+            return res.end('Payload Too Large');
+        }
+        throw err;
+    }
+
+    const apiReq = buildApiRequest(req, path, params, query, reqBody);
+    const apiRes = createApiResponse();
+
     let body = {};
     try {
         const apiFn = await loadApi(baseDir, route);
-        body = await runApi(apiFn, { router, params, query });
+        body = await runApi(apiFn, apiReq, apiRes);
     } catch (err) {
         if (err instanceof Redirect) {
-            res.writeHead(err.permanent ? 301 : 302, { location: err.path });
+            const headers = { location: err.path };
+            const cookies = apiRes.takeCookies();
+            if (cookies.length) headers['set-cookie'] = cookies;
+            res.writeHead(err.permanent ? 301 : 302, headers);
             return res.end();
         }
         throw err;
@@ -165,11 +183,15 @@ async function renderPage(baseDir, importMap, path, url, res) {
     const manifest = routes.map(r => ({ pattern: r.pattern, params: r.params, dir: r.dir, hasApi: r.hasApi }));
     const data = { path, params, body, manifest };
 
-    res.writeHead(200, { 'content-type': 'text/html' });
-    res.end(renderShell({ appHtml, importMap, data }));
+    const headers = { 'content-type': 'text/html', ...apiRes.takeHeaders() };
+    const cookies = apiRes.takeCookies();
+    if (cookies.length) headers['set-cookie'] = cookies;
+    apiRes.markSent();
+    res.writeHead(apiRes.status() ?? 200, headers);
+    res.end(renderShell({ appHtml, importMap, data, head: body.head }));
 }
 
-async function streamData(baseDir, path, url, res) {
+async function streamData(baseDir, path, url, req, res) {
     const routes = await scanRoutes(baseDir);
     const match = matchPath(routes, path);
     if (!match) {
@@ -179,34 +201,175 @@ async function streamData(baseDir, path, url, res) {
 
     const { route, params } = match;
     const query = parseQuery(url.search);
-    const router = serverRouter(path);
     const apiFn = await loadApi(baseDir, route);
 
-    res.writeHead(200, {
-        'content-type': 'application/x-ndjson',
-        'cache-control': 'no-store',
-    });
+    let reqBody;
+    try {
+        reqBody = await readRequestBody(req);
+    } catch (err) {
+        if (err && err.code === 'PAYLOAD_TOO_LARGE') {
+            res.writeHead(413, { 'content-type': 'text/plain' });
+            return res.end('Payload Too Large');
+        }
+        throw err;
+    }
+
+    const apiReq = buildApiRequest(req, path, params, query, reqBody);
+    const apiRes = createApiResponse();
 
     if (!apiFn) {
+        res.writeHead(200, {
+            'content-type': 'application/x-ndjson',
+            'cache-control': 'no-store',
+        });
         res.write(JSON.stringify({}) + '\n');
         return res.end();
     }
 
+    const flushHeaders = () => {
+        const headers = {
+            'content-type': 'application/x-ndjson',
+            'cache-control': 'no-store',
+            ...apiRes.takeHeaders(),
+        };
+        const cookies = apiRes.takeCookies();
+        if (cookies.length) headers['set-cookie'] = cookies;
+        apiRes.markSent();
+        res.writeHead(apiRes.status() ?? 200, headers);
+    };
+
     try {
-        const result = apiFn({ router, params, query });
+        const result = apiFn(apiReq, apiRes);
         if (isAsyncIterable(result)) {
-            for await (const chunk of result) res.write(JSON.stringify(chunk) + '\n');
+            let headersFlushed = false;
+            for await (const chunk of result) {
+                if (!headersFlushed) { flushHeaders(); headersFlushed = true; }
+                res.write(JSON.stringify(chunk) + '\n');
+            }
+            if (!headersFlushed) flushHeaders();
         } else {
-            res.write(JSON.stringify(await result) + '\n');
+            const value = await result;
+            flushHeaders();
+            res.write(JSON.stringify(value) + '\n');
         }
         res.end();
     } catch (err) {
         if (err instanceof Redirect) {
+            if (!res.headersSent) {
+                const headers = {
+                    'content-type': 'application/x-ndjson',
+                    'cache-control': 'no-store',
+                };
+                const cookies = apiRes.takeCookies();
+                if (cookies.length) headers['set-cookie'] = cookies;
+                res.writeHead(200, headers);
+            }
             res.write(JSON.stringify({ __redirect: err.path }) + '\n');
             return res.end();
         }
         throw err;
     }
+}
+
+function buildApiRequest(req, path, params, query, body) {
+    return {
+        method: req.method,
+        path,
+        params,
+        query,
+        body,
+        cookies: parseCookies(req.headers.cookie),
+    };
+}
+
+function parseCookies(header) {
+    const out = {};
+    if (!header) return out;
+    for (const part of header.split(';')) {
+        const eq = part.indexOf('=');
+        if (eq < 0) continue;
+        const name = part.slice(0, eq).trim();
+        const raw = part.slice(eq + 1).trim();
+        if (!name) continue;
+        try { out[name] = decodeURIComponent(raw); }
+        catch { out[name] = raw; }
+    }
+    return out;
+}
+
+async function readRequestBody(req) {
+    const method = (req.method || 'GET').toUpperCase();
+    if (method === 'GET' || method === 'HEAD') return null;
+    const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    if (contentType !== 'application/json' && contentType !== 'application/x-www-form-urlencoded') {
+        // Drain so the connection isn't left half-read, but don't expose the bytes.
+        req.resume();
+        return null;
+    }
+
+    let total = 0;
+    const chunks = [];
+    for await (const chunk of req) {
+        total += chunk.length;
+        if (total > MAX_BODY_BYTES) {
+            const err = new Error('Payload Too Large');
+            err.code = 'PAYLOAD_TOO_LARGE';
+            throw err;
+        }
+        chunks.push(chunk);
+    }
+    if (total === 0) return null;
+    const text = Buffer.concat(chunks).toString('utf8');
+
+    if (contentType === 'application/json') {
+        try { return JSON.parse(text); } catch { return null; }
+    }
+    return Object.fromEntries(new URLSearchParams(text));
+}
+
+function createApiResponse() {
+    let status = null;
+    const headers = {};
+    const cookies = [];
+    let sent = false;
+
+    return {
+        setStatus(code) {
+            if (sent) { console.warn('setStatus called after response started; ignoring'); return; }
+            status = code;
+        },
+        setHeader(name, value) {
+            if (sent) { console.warn('setHeader called after response started; ignoring'); return; }
+            headers[String(name).toLowerCase()] = value;
+        },
+        setCookie(name, value, opts) {
+            if (sent) { console.warn('setCookie called after response started; ignoring'); return; }
+            cookies.push(serializeCookie(name, value, opts));
+        },
+        redirect(to, opts) {
+            throw new Redirect(to, !!(opts && opts.permanent));
+        },
+        status() { return status; },
+        takeHeaders() { const h = headers; return { ...h }; },
+        takeCookies() { return cookies.slice(); },
+        markSent() { sent = true; },
+    };
+}
+
+function serializeCookie(name, value, opts = {}) {
+    const parts = [`${name}=${encodeURIComponent(value)}`];
+    if (opts.domain) parts.push(`Domain=${opts.domain}`);
+    if (opts.path) parts.push(`Path=${opts.path}`);
+    if (typeof opts.maxAge === 'number') parts.push(`Max-Age=${Math.floor(opts.maxAge)}`);
+    if (opts.expires instanceof Date) parts.push(`Expires=${opts.expires.toUTCString()}`);
+    if (opts.httpOnly) parts.push('HttpOnly');
+    if (opts.secure) parts.push('Secure');
+    if (opts.sameSite) {
+        const v = opts.sameSite.toLowerCase();
+        const map = { strict: 'Strict', lax: 'Lax', none: 'None' };
+        if (map[v]) parts.push(`SameSite=${map[v]}`);
+    }
+    return parts.join('; ');
 }
 
 function serverRouter(path) {
@@ -230,22 +393,32 @@ function makeBodySignals(body) {
     return signals;
 }
 
-function renderShell({ appHtml, importMap, data }) {
+function renderShell({ appHtml, importMap, data, head }) {
     const json = JSON.stringify(data).replaceAll('<', '\\u003c');
+    const title = (head && typeof head.title === 'string' && head.title) || 'last-router';
     return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>last-router</title>
+<title>${escapeHtml(title)}</title>
 <script type="importmap">${JSON.stringify({ imports: importMap })}</script>
 </head>
 <body>
 <div id="app">${appHtml}</div>
+<div id="__portal_root"></div>
 <script type="application/json" id="__last_router_data">${json}</script>
 <script type="module" src="/__router/client.js"></script>
 </body>
 </html>`;
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
 }
 
 function defaultImports(baseDir) {

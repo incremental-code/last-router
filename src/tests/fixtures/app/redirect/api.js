@@ -1,3 +1,3 @@
-export default async function redirect({ router }) {
-    router.push('/');
+export default async function redirect(req, res) {
+    res.redirect('/');
 }
