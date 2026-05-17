@@ -4,10 +4,17 @@
   "description": "An isomorphic file-system router for the last-js ecosystem.",
   "type": "module",
   "main": "src/server.js",
+  "types": "src/server.d.ts",
   "exports": {
-    "./server": "./src/server.js",
+    "./server": {
+      "types": "./src/server.d.ts",
+      "default": "./src/server.js"
+    },
     "./client": "./src/client.js",
-    "./common": "./src/common.js"
+    "./common": {
+      "types": "./src/common.d.ts",
+      "default": "./src/common.js"
+    }
   },
   "scripts": {
     "demo": "node demo/index.js",
