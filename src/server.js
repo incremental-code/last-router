@@ -4,6 +4,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createElement, serialize } from '@incremental-code/last-act';
+import { Signal } from 'signal-polyfill';
 import { buildRoute, matchPath, parseQuery } from './common.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -129,7 +130,8 @@ async function renderPage(baseDir, importMap, path, url, res) {
     }
 
     const Page = await loadPage(baseDir, route);
-    const appHtml = serialize(createElement(Page, { router, params, body }));
+    const reactiveBody = makeBodySignals(body);
+    const appHtml = serialize(createElement(Page, { router, params, body: reactiveBody }));
 
     const manifest = routes.map(r => ({ pattern: r.pattern, params: r.params, dir: r.dir, hasApi: r.hasApi }));
     const data = { path, params, body, manifest };
@@ -184,6 +186,19 @@ function serverRouter(path) {
         push: target => { throw new Redirect(target); },
         replace: target => { throw new Redirect(target, true); },
     };
+}
+
+/**
+ * Wrap each top-level body field in Signal.State so pages see the same shape
+ * server-side (SSR) as they do on the client. Mirrors makeBodySignals() in
+ * client.js.
+ */
+function makeBodySignals(body) {
+    const signals = {};
+    for (const [k, v] of Object.entries(body || {})) {
+        signals[k] = new Signal.State(v);
+    }
+    return signals;
 }
 
 function renderShell({ appHtml, importMap, data }) {

@@ -21,7 +21,12 @@
     "test": "node --test \"src/tests/*.test.js\""
   },
   "dependencies": {
-    "@incremental-code/last-act": "file:../last-act",
+    "@incremental-code/last-act": "file:../last-act"
+  },
+  "peerDependencies": {
+    "signal-polyfill": "^0.2.2"
+  },
+  "devDependencies": {
     "signal-polyfill": "^0.2.2"
   }
 }
