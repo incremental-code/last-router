@@ -10,7 +10,8 @@
     "./common": "./src/common.js"
   },
   "scripts": {
-    "demo": "node demo/index.js"
+    "demo": "node demo/index.js",
+    "test": "node --test \"src/tests/*.test.js\""
   },
   "dependencies": {
     "@incremental-code/last-act": "file:../last-act",

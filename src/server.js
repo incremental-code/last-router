@@ -1,7 +1,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { readFile, readdir } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
-import { dirname, extname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createElement, serialize } from '@incremental-code/last-act';
 import { buildRoute, matchPath, parseQuery } from './common.js';
@@ -35,8 +35,8 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
 
             if (path === '/__router/client.js') return sendFile(join(HERE, 'client.js'), res);
             if (path === '/__router/common.js') return sendFile(join(HERE, 'common.js'), res);
-            if (path.startsWith('/__module/')) return serveModule(baseDir, decodeURIComponent(path.slice('/__module/'.length)), res);
-            if (path.startsWith('/__src/')) return sendFile(join(baseDir, decodeURIComponent(path.slice('/__src/'.length))), res);
+            if (path.startsWith('/__module/')) return serveUnder(findNodeModules(baseDir), path.slice('/__module/'.length), res);
+            if (path.startsWith('/__src/')) return serveUnder(baseDir, path.slice('/__src/'.length), res);
             if (path.startsWith('/__data')) return streamData(baseDir, path.slice('/__data'.length) || '/', url, res);
 
             return renderPage(baseDir, importMap, path, url, res);
@@ -53,7 +53,7 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
         connect() {
             return new Promise((res, rej) => {
                 server.once('error', rej);
-                server.listen(port, () => res({ url: `http://localhost:${port}` }));
+                server.listen(port, () => res({ url: `http://localhost:${server.address().port}` }));
             });
         },
         close() {
@@ -229,10 +229,11 @@ function findNodeModules(start) {
     }
 }
 
-async function serveModule(baseDir, sub, res) {
-    const nm = findNodeModules(baseDir);
-    if (!nm) return notFound(res);
-    return sendFile(join(nm, sub), res);
+async function serveUnder(base, sub, res) {
+    if (!base) return notFound(res);
+    const resolved = resolve(base, decodeURIComponent(sub));
+    if (resolved !== base && !resolved.startsWith(base + sep)) return notFound(res);
+    return sendFile(resolved, res);
 }
 
 async function sendFile(absPath, res) {
