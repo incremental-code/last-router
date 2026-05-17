@@ -95,17 +95,46 @@ async function loadPage(baseDir, route) {
     return mod.default;
 }
 
+const SSR_DRAIN_MS = 1000;
+
 async function runApi(apiFn, context) {
     const body = {};
     if (!apiFn) return body;
 
     const result = apiFn(context);
     if (isAsyncIterable(result)) {
-        for await (const chunk of result) Object.assign(body, chunk);
+        await drainForSsr(result, body, SSR_DRAIN_MS);
     } else {
         Object.assign(body, await result);
     }
     return body;
+}
+
+/**
+ * Drain chunks from an async iterable into `body`, but stop after `timeoutMs`
+ * and close the iterator. This lets infinite "live" apis return their initial
+ * chunks for SSR without hanging the request. The client picks up subsequent
+ * chunks via /__data.
+ */
+async function drainForSsr(iterable, body, timeoutMs) {
+    const iter = iterable[Symbol.asyncIterator]();
+    const deadline = Date.now() + timeoutMs;
+    try {
+        while (true) {
+            const remaining = deadline - Date.now();
+            if (remaining <= 0) break;
+            const next = iter.next();
+            const timer = new Promise(resolve => setTimeout(() => resolve('__ssr_timeout'), remaining));
+            const winner = await Promise.race([next, timer]);
+            if (winner === '__ssr_timeout') break;
+            if (winner.done) break;
+            if (winner.value) Object.assign(body, winner.value);
+        }
+    } finally {
+        if (typeof iter.return === 'function') {
+            await iter.return().catch(() => {});
+        }
+    }
 }
 
 async function renderPage(baseDir, importMap, path, url, res) {

@@ -1,5 +1,5 @@
 import { Signal } from 'signal-polyfill';
-import { createElement, mount, hydrate } from '@incremental-code/last-act';
+import { createElement, mount, hydrate, onUnmount } from '@incremental-code/last-act';
 import { matchPath } from '/__router/common.js';
 
 const data = JSON.parse(document.getElementById('__last_router_data').textContent);
@@ -13,6 +13,8 @@ const router = {
     replace(target) { history.replaceState(null, '', target); navigate(target); },
 };
 
+let currentBody = null;
+
 window.addEventListener('popstate', () => navigate(location.pathname + location.search));
 window.addEventListener('click', interceptLinks);
 
@@ -21,10 +23,11 @@ await hydrateInitial();
 async function hydrateInitial() {
     const match = matchPath(manifest, data.path);
     if (!match) return;
-    const body = makeBodySignals(data.body);
+    currentBody = makeBodySignals(data.body);
     const Page = await loadPage(match.route);
-    const vnode = createElement(Page, { router, params: match.params, body });
+    const vnode = createElement(Page, { router, params: match.params, body: currentBody });
     hydrate(vnode, appEl.firstElementChild);
+    streamInto(data.path, appEl.firstElementChild, { skipFirstChunk: true });
 }
 
 async function navigate(target) {
@@ -32,39 +35,113 @@ async function navigate(target) {
     const match = matchPath(manifest, target);
     if (!match) return;
 
-    const response = await fetch('/__data' + target);
+    currentBody = null;
+
+    const controller = new AbortController();
+    const ownBody = {};
+    let response;
+    try {
+        response = await fetch('/__data' + target, { signal: controller.signal });
+    } catch (err) {
+        if (err.name !== 'AbortError') console.error(err);
+        return;
+    }
+
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    let body = null;
+    let mountedNode = null;
 
-    while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += decoder.decode(value, { stream: true });
 
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
+            const lines = buffer.split('\n');
+            buffer = lines.pop();
 
-        for (const line of lines) {
-            if (!line) continue;
-            const chunk = JSON.parse(line);
+            for (const line of lines) {
+                if (!line) continue;
+                const chunk = JSON.parse(line);
 
-            if (chunk.__redirect) {
-                router.replace(chunk.__redirect);
-                return;
-            }
+                if (chunk.__redirect) {
+                    controller.abort();
+                    router.replace(chunk.__redirect);
+                    return;
+                }
 
-            if (!body) {
-                body = makeBodySignals(chunk);
-                const Page = await loadPage(match.route);
-                const vnode = createElement(Page, { router, params: match.params, body });
-                appEl.replaceChildren(mount(vnode));
-            } else {
-                mergeIntoSignals(body, chunk);
+                if (!mountedNode) {
+                    Object.assign(ownBody, chunk);
+                    currentBody = makeBodySignals(ownBody);
+                    const Page = await loadPage(match.route);
+                    const vnode = createElement(Page, { router, params: match.params, body: currentBody });
+                    mountedNode = mount(vnode);
+                    onUnmount(mountedNode, () => controller.abort());
+                    appEl.replaceChildren(mountedNode);
+                } else if (currentBody) {
+                    mergeIntoSignals(currentBody, chunk);
+                }
             }
         }
+    } catch (err) {
+        if (err.name !== 'AbortError') console.error(err);
     }
+}
+
+/**
+ * Open a /__data stream and merge chunks into the existing currentBody until
+ * the given DOM node is unmounted (next navigation replaces appEl's child).
+ */
+function streamInto(target, node, { skipFirstChunk } = {}) {
+    const controller = new AbortController();
+    onUnmount(node, () => controller.abort());
+
+    (async () => {
+        let response;
+        try {
+            response = await fetch('/__data' + target, { signal: controller.signal });
+        } catch (err) {
+            if (err.name !== 'AbortError') console.error(err);
+            return;
+        }
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        let firstSkipped = !skipFirstChunk;
+
+        try {
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+                buffer += decoder.decode(value, { stream: true });
+
+                const lines = buffer.split('\n');
+                buffer = lines.pop();
+
+                for (const line of lines) {
+                    if (!line) continue;
+                    const chunk = JSON.parse(line);
+
+                    if (chunk.__redirect) {
+                        controller.abort();
+                        router.replace(chunk.__redirect);
+                        return;
+                    }
+
+                    if (!firstSkipped) {
+                        firstSkipped = true;
+                        continue;
+                    }
+
+                    if (currentBody) mergeIntoSignals(currentBody, chunk);
+                }
+            }
+        } catch (err) {
+            if (err.name !== 'AbortError') console.error(err);
+        }
+    })();
 }
 
 async function loadPage(route) {
