@@ -1,0 +1,19 @@
+{
+  "name": "@incremental-code/last-router",
+  "version": "1.0.0",
+  "description": "An isomorphic file-system router for the last-js ecosystem.",
+  "type": "module",
+  "main": "src/server.js",
+  "exports": {
+    "./server": "./src/server.js",
+    "./client": "./src/client.js",
+    "./common": "./src/common.js"
+  },
+  "scripts": {
+    "demo": "node demo/index.js"
+  },
+  "dependencies": {
+    "@incremental-code/last-act": "file:../last-act",
+    "signal-polyfill": "^0.2.2"
+  }
+}
