@@ -1,3 +1,5 @@
+import { Signal } from 'signal-polyfill';
+
 const DYNAMIC = /^\[(.+)\]$/;
 
 /**
@@ -66,4 +68,27 @@ export function parseQuery(search) {
         query[key] = value;
     }
     return query;
+}
+
+/**
+ * Wrap top-level body fields in Signal.State and lazily create missing keys so
+ * pages can safely read `body.someField.get()` before streaming updates arrive.
+ */
+export function makeBodySignals(body) {
+    const signals = {};
+    for (const [key, value] of Object.entries(body || {})) {
+        signals[key] = new Signal.State(value);
+    }
+
+    return new Proxy(signals, {
+        get(target, property, receiver) {
+            if (typeof property !== 'string') {
+                return Reflect.get(target, property, receiver);
+            }
+            if (!(property in target)) {
+                target[property] = new Signal.State(undefined);
+            }
+            return target[property];
+        },
+    });
 }

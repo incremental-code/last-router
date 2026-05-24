@@ -1,6 +1,6 @@
 import { Signal } from 'signal-polyfill';
 import { createElement, mount, hydrate, onUnmount, effect } from '@incremental-code/last-act';
-import { matchPath } from '/__router/common.js';
+import { makeBodySignals, matchPath } from '/__router/common.js';
 
 const data = JSON.parse(document.getElementById('__last_router_data').textContent);
 const manifest = data.manifest;
@@ -152,12 +152,6 @@ async function loadPage(route) {
     return mod.default;
 }
 
-function makeBodySignals(obj) {
-    const signals = {};
-    for (const [k, v] of Object.entries(obj || {})) signals[k] = new Signal.State(v);
-    return signals;
-}
-
 function mergeIntoSignals(signals, chunk) {
     for (const [k, v] of Object.entries(chunk)) {
         if (signals[k]) signals[k].set(v);
@@ -170,7 +164,7 @@ function mergeIntoSignals(signals, chunk) {
  * document.title. Cleans up when the mounted node unmounts.
  */
 function attachTitleEffect(body, node) {
-    if (!body.head) return;
+    if (!Object.hasOwn(body, 'head')) return;
     const stop = effect(() => {
         const head = body.head.get();
         const title = head && typeof head.title === 'string' ? head.title : null;

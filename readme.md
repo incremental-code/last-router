@@ -22,7 +22,7 @@ Each folder can colocate an `api.js`. Its default export receives `{ router, par
 
 ## page.js
 
-A plain function component. Receives `{ router, params, body }`. Use `createElement` from last-act:
+A plain function component. Receives `{ router, params, body }`. Top-level `body` fields are `Signal.State` values, so read them with `.get()` and they will update reactively on the client. Use `createElement` from last-act:
 
 ```js
 import { createElement } from '@incremental-code/last-act';
@@ -30,7 +30,7 @@ import { createElement } from '@incremental-code/last-act';
 export default function Profile({ params: { username }, body }) {
     return createElement('div', undefined,
         createElement('h1', undefined, `Profile for ${username}`),
-        createElement('p', undefined, body.greeting),
+        createElement('p', undefined, body.greeting.get()),
     );
 }
 ```

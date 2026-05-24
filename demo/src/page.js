@@ -9,8 +9,8 @@ export default function Home({ router, body }) {
     };
 
     return createElement('div', undefined,
-        createElement('h1', undefined, body.title),
-        createElement('p', undefined, body.intro),
+        createElement('h1', undefined, body.title.get()),
+        createElement('p', undefined, body.intro.get()),
         createElement('input', {
             value: input.get(),
             placeholder: 'username',
