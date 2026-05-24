@@ -1,6 +1,6 @@
 {
   "name": "@incremental-code/last-router",
-  "version": "1.0.0",
+  "version": "0.0.1",
   "description": "An isomorphic file-system router for the last-js ecosystem.",
   "type": "module",
   "main": "src/server.js",
@@ -20,8 +20,11 @@
     "demo": "node demo/index.js",
     "test": "node --test \"src/tests/*.test.js\""
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "dependencies": {
-    "@incremental-code/last-act": "file:../last-act"
+    "@incremental-code/last-act": "^0.0.1"
   },
   "peerDependencies": {
     "signal-polyfill": "^0.2.2"
