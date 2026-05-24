@@ -34,6 +34,7 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
             const url = new URL(req.url, `http://${req.headers.host}`);
             const path = url.pathname;
 
+            if (path === '/health') return sendHealth(res);
             if (path === '/__router/client.js') return sendFile(join(HERE, 'client.js'), res);
             if (path === '/__router/common.js') return sendFile(join(HERE, 'common.js'), res);
             if (path.startsWith('/__module/')) return serveUnder(findNodeModules(baseDir), path.slice('/__module/'.length), res);
@@ -419,6 +420,14 @@ function escapeHtml(s) {
         .replaceAll('<', '&lt;')
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;');
+}
+
+function sendHealth(res) {
+    res.writeHead(200, {
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+    });
+    res.end('ok');
 }
 
 function defaultImports(baseDir) {

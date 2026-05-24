@@ -52,6 +52,13 @@ describe('SSR', () => {
         assert.equal(res.status, 404);
     });
 
+    it('serves a built-in health route', async () => {
+        const res = await fetch(baseUrl + '/health');
+        assert.equal(res.status, 200);
+        assert.match(res.headers.get('content-type'), /^text\/plain/);
+        assert.equal(await res.text(), 'ok');
+    });
+
     it('returns 302 when the api calls router.push', async () => {
         const res = await fetch(baseUrl + '/redirect', { redirect: 'manual' });
         assert.equal(res.status, 302);

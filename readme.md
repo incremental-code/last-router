@@ -66,6 +66,11 @@ router.replace(path)  // history.replaceState + navigate
 
 On the server, `push` and `replace` throw a redirect that becomes a 302.
 
+## Built-in health route
+
+`createServer()` always serves `GET /health` with `200 OK` and a plain-text body of `ok`.
+This route is reserved for process health checks and is handled before file-system routing.
+
 ## Demo
 
 ```
