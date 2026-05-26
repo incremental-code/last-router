@@ -1,6 +1,6 @@
 {
   "name": "@incremental-code/last-router",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "An isomorphic file-system router for the last-js ecosystem.",
   "type": "module",
   "main": "src/server.js",
