@@ -18,7 +18,7 @@ src/about/page.js        →  /about
 src/[username]/page.js   →  /:username
 ```
 
-Each folder can colocate an `api.js`. Its default export receives `{ router, params, query }` and returns (or yields) the `body` that gets passed to the matching `page.js`.
+Each folder can colocate an `api.js`. Its default export receives an `ApiRequest` with `method`, `path`, `params`, `query`, `body`, `headers`, and `cookies`, and returns (or yields) the `body` that gets passed to the matching `page.js`.
 
 ## page.js
 
@@ -41,8 +41,11 @@ Return a value, or yield partial updates:
 
 ```js
 // one-shot
-export default async function ({ params }) {
-    return { greeting: `Hello, ${params.username}!` };
+export default async function ({ params, headers }) {
+    return {
+        greeting: `Hello, ${params.username}!`,
+        host: headers.host ?? 'unknown-host',
+    };
 }
 
 // streaming — each yield is a partial body merge

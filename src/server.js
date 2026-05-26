@@ -278,8 +278,23 @@ function buildApiRequest(req, path, params, query, body) {
         params,
         query,
         body,
+        headers: copyHeaders(req.headers),
         cookies: parseCookies(req.headers.cookie),
     };
+}
+
+function copyHeaders(headers) {
+    const out = {};
+    for (const [name, value] of Object.entries(headers || {})) {
+        if (Array.isArray(value)) {
+            out[name] = value.slice();
+            continue;
+        }
+        if (typeof value === 'string' || value == null) {
+            out[name] = value;
+        }
+    }
+    return out;
 }
 
 function parseCookies(header) {

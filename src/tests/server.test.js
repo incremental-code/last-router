@@ -65,11 +65,18 @@ describe('SSR', () => {
         assert.equal(res.headers.get('location'), '/');
     });
 
+    it('passes request headers to the api', async () => {
+        const html = await (await fetch(baseUrl + '/headers', {
+            headers: { 'x-test-header': 'from-test' },
+        })).text();
+        assert.match(html, /<p>from-test<\/p>/);
+    });
+
     it('embeds a route manifest in the shell', async () => {
         const html = await (await fetch(baseUrl + '/')).text();
         const data = readData(html);
         const patterns = data.manifest.map(r => r.pattern).sort();
-        assert.deepEqual(patterns, ['/', '/:slug', '/danger', '/redirect', '/static', '/stream']);
+        assert.deepEqual(patterns, ['/', '/:slug', '/danger', '/headers', '/redirect', '/static', '/stream']);
     });
 
     it('escapes < inside the embedded JSON to prevent script breakout', async () => {

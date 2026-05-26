@@ -71,6 +71,7 @@ export interface ApiRequest<P extends Params = Params, Q extends Query = Query, 
     params: P;
     query: Q;
     body: B;
+    headers: Record<string, string | string[] | undefined>;
     cookies: Record<string, string>;
 }
 
