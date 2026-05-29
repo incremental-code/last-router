@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoute, matchPath, parseQuery } from '../common.js';
+import { buildRoute, matchPath, parseListParams, parseQuery } from '../common.js';
 
 describe('buildRoute', () => {
     it('builds the root route from no segments', () => {
@@ -96,5 +96,45 @@ describe('parseQuery', () => {
 
     it('decodes percent-encoded values', () => {
         assert.deepEqual(parseQuery('?q=hello%20world'), { q: 'hello world' });
+    });
+});
+
+describe('parseListParams', () => {
+    it('returns defaults when query is empty', () => {
+        const out = parseListParams({});
+        assert.equal(out.page, 1);
+        assert.equal(out.pageSize, 20);
+        assert.equal(out.offset, 0);
+        assert.equal(out.limit, 20);
+        assert.equal(out.sort, null);
+        assert.equal(out.q, '');
+    });
+
+    it('parses page and pageSize and clamps to the configured maximum', () => {
+        const out = parseListParams({ page: '3', pageSize: '500' }, { maxPageSize: 100 });
+        assert.equal(out.page, 3);
+        assert.equal(out.pageSize, 100);
+        assert.equal(out.offset, 200);
+        assert.equal(out.limit, 100);
+    });
+
+    it('rejects negative and non-numeric page values', () => {
+        assert.equal(parseListParams({ page: '-3' }).page, 1);
+        assert.equal(parseListParams({ page: 'abc' }).page, 1);
+    });
+
+    it('only accepts sort tokens in the allowlist', () => {
+        const allowed = ['publishedAt', '-publishedAt'];
+        assert.equal(parseListParams({ sort: 'title' }, { allowedSorts: allowed }).sort, null);
+        assert.equal(parseListParams({ sort: '-publishedAt' }, { allowedSorts: allowed }).sort, '-publishedAt');
+    });
+
+    it('falls back to defaultSort when no sort is provided', () => {
+        assert.equal(parseListParams({}, { defaultSort: '-createdAt' }).sort, '-createdAt');
+    });
+
+    it('trims the search query and honours a custom key', () => {
+        assert.equal(parseListParams({ q: '  hello  ' }).q, 'hello');
+        assert.equal(parseListParams({ search: 'world' }, { searchKey: 'search' }).q, 'world');
     });
 });

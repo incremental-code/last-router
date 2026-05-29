@@ -24,6 +24,23 @@ class Redirect {
     }
 }
 
+/**
+ * Parse pagination, sorting, and search params from a query object.
+ *
+ * @param {Record<string, any>} query - The request query object (req.query).
+ * @param {{ defaults?: object, allowedSorts?: string[] }} opts
+ * @returns {{ page: number, perPage: number, sort: string, dir: 'asc'|'desc', q: string }}
+ */
+export function parseListParams(query, { defaults = {}, allowedSorts = [] } = {}) {
+    const page = Math.max(1, parseInt(String(query?.page || ''), 10) || defaults.page || 1);
+    const perPage = Math.max(1, Math.min(100, parseInt(String(query?.perPage || ''), 10) || defaults.perPage || 20));
+    const rawSort = String(query?.sort || defaults.sort || '');
+    const sort = allowedSorts.includes(rawSort) ? rawSort : (defaults.sort || '');
+    const dir = String(query?.dir || defaults.dir || '') === 'asc' ? 'asc' : 'desc';
+    const q = String(query?.q || '').trim();
+    return { page, perPage, sort, dir, q };
+}
+
 export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
     const baseDir = resolve(process.cwd(), base);
     const importMap = { ...defaultImports(baseDir), ...imports };
@@ -168,7 +185,7 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
     } catch (err) {
         if (err instanceof Redirect) {
             const headers = { location: err.path };
-            const cookies = apiRes.takeCookies();
+            const cookies = withFlashClear(apiReq, apiRes.takeCookies());
             if (cookies.length) headers['set-cookie'] = cookies;
             res.writeHead(err.permanent ? 301 : 302, headers);
             return res.end();
@@ -184,7 +201,7 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
     const data = { path, params, body, manifest };
 
     const headers = { 'content-type': 'text/html', ...apiRes.takeHeaders() };
-    const cookies = apiRes.takeCookies();
+    const cookies = withFlashClear(apiReq, apiRes.takeCookies());
     if (cookies.length) headers['set-cookie'] = cookies;
     apiRes.markSent();
     res.writeHead(apiRes.status() ?? 200, headers);
@@ -232,7 +249,7 @@ async function streamData(baseDir, path, url, req, res) {
             'cache-control': 'no-store',
             ...apiRes.takeHeaders(),
         };
-        const cookies = apiRes.takeCookies();
+        const cookies = withFlashClear(apiReq, apiRes.takeCookies());
         if (cookies.length) headers['set-cookie'] = cookies;
         apiRes.markSent();
         res.writeHead(apiRes.status() ?? 200, headers);
@@ -260,7 +277,7 @@ async function streamData(baseDir, path, url, req, res) {
                     'content-type': 'application/x-ndjson',
                     'cache-control': 'no-store',
                 };
-                const cookies = apiRes.takeCookies();
+                const cookies = withFlashClear(apiReq, apiRes.takeCookies());
                 if (cookies.length) headers['set-cookie'] = cookies;
                 res.writeHead(200, headers);
             }
@@ -271,7 +288,10 @@ async function streamData(baseDir, path, url, req, res) {
     }
 }
 
+const FLASH_COOKIE = '_flash';
+
 function buildApiRequest(req, path, params, query, body) {
+    const cookies = parseCookies(req.headers.cookie);
     return {
         method: req.method,
         path,
@@ -279,8 +299,33 @@ function buildApiRequest(req, path, params, query, body) {
         query,
         body,
         headers: copyHeaders(req.headers),
-        cookies: parseCookies(req.headers.cookie),
+        cookies,
+        flash: readFlash(cookies),
     };
+}
+
+function readFlash(cookies) {
+    const raw = cookies && cookies[FLASH_COOKIE];
+    if (!raw) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && typeof parsed.kind === 'string') {
+            return { kind: parsed.kind, message: String(parsed.message ?? '') };
+        }
+    } catch {}
+    return null;
+}
+
+function clearFlashCookie() {
+    return serializeCookie(FLASH_COOKIE, '', { path: '/', maxAge: 0, httpOnly: true, sameSite: 'lax' });
+}
+
+// Prepend a flash-clear cookie when the inbound request had one. Browsers honour
+// the latest Set-Cookie header per name in a response, so a clear at the front
+// stays out of the way of a fresh res.flash() set later in the same response.
+function withFlashClear(apiReq, cookies) {
+    if (!apiReq || !apiReq.flash) return cookies;
+    return [clearFlashCookie(), ...cookies];
 }
 
 function copyHeaders(headers) {
@@ -360,6 +405,18 @@ function createApiResponse() {
         setCookie(name, value, opts) {
             if (sent) { console.warn('setCookie called after response started; ignoring'); return; }
             cookies.push(serializeCookie(name, value, opts));
+        },
+        flash(kind, message) {
+            if (sent) { console.warn('flash called after response started; ignoring'); return; }
+            const payload = JSON.stringify({
+                kind: String(kind || 'info'),
+                message: String(message ?? ''),
+            });
+            cookies.push(serializeCookie(FLASH_COOKIE, payload, {
+                path: '/',
+                httpOnly: true,
+                sameSite: 'lax',
+            }));
         },
         redirect(to, opts) {
             throw new Redirect(to, !!(opts && opts.permanent));

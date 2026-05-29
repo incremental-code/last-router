@@ -76,7 +76,7 @@ describe('SSR', () => {
         const html = await (await fetch(baseUrl + '/')).text();
         const data = readData(html);
         const patterns = data.manifest.map(r => r.pattern).sort();
-        assert.deepEqual(patterns, ['/', '/:slug', '/danger', '/headers', '/redirect', '/static', '/stream']);
+        assert.deepEqual(patterns, ['/', '/:slug', '/danger', '/flash/read', '/flash/set', '/headers', '/redirect', '/static', '/stream']);
     });
 
     it('escapes < inside the embedded JSON to prevent script breakout', async () => {
@@ -200,5 +200,42 @@ describe('import map', () => {
         } finally {
             await s.close();
         }
+    });
+});
+
+describe('flash messages', () => {
+    function extractFlashCookie(setCookie) {
+        if (!setCookie) return null;
+        const headers = Array.isArray(setCookie) ? setCookie : setCookie.split(/,(?=\s*[^=]+=)/);
+        const match = headers.find((line) => line.trim().startsWith('_flash='));
+        if (!match) return null;
+        const value = match.split(';')[0].slice('_flash='.length);
+        return decodeURIComponent(value);
+    }
+
+    it('sets a _flash cookie when res.flash(...) is called', async () => {
+        const res = await fetch(baseUrl + '/flash/set');
+        const raw = extractFlashCookie(res.headers.get('set-cookie'));
+        assert.ok(raw, 'expected a _flash cookie to be set');
+        const parsed = JSON.parse(raw);
+        assert.equal(parsed.kind, 'success');
+        assert.equal(parsed.message, 'Saved!');
+    });
+
+    it('exposes req.flash on the next request and clears the cookie', async () => {
+        const cookie = '_flash=' + encodeURIComponent(JSON.stringify({ kind: 'success', message: 'Hi' }));
+        const res = await fetch(baseUrl + '/flash/read', { headers: { cookie } });
+        const html = await res.text();
+        assert.match(html, /success:Hi/);
+
+        const setCookie = res.headers.get('set-cookie') || '';
+        assert.match(setCookie, /_flash=;/, 'flash cookie should be cleared on read');
+        assert.match(setCookie, /Max-Age=0/);
+    });
+
+    it('returns flash=null when no _flash cookie is present', async () => {
+        const res = await fetch(baseUrl + '/flash/read');
+        const html = await res.text();
+        assert.match(html, /none:/);
     });
 });
