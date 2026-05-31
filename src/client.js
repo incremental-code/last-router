@@ -42,9 +42,16 @@ async function hydrateInitial() {
     currentBody = makeBodySignals(data.body);
     const Page = await loadPage(match.route);
     const vnode = createElement(Page, { router, params: match.params, body: currentBody });
-    hydrate(vnode, appEl.firstElementChild);
-    attachTitleEffect(currentBody, appEl.firstElementChild);
-    streamInto(data.path, appEl.firstElementChild, { skipFirstChunk: true });
+    try {
+        hydrate(vnode, appEl.firstElementChild);
+        attachTitleEffect(currentBody, appEl.firstElementChild);
+        streamInto(data.path, appEl.firstElementChild, { skipFirstChunk: true });
+    } catch {
+        const mountedNode = mount(vnode);
+        appEl.replaceChildren(mountedNode);
+        attachTitleEffect(currentBody, mountedNode);
+        streamInto(data.path, mountedNode, { skipFirstChunk: true });
+    }
 }
 
 async function navigate(target) {
