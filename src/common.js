@@ -70,6 +70,52 @@ export function parseQuery(search) {
     return query;
 }
 
+export function normalizeBasePath(value) {
+    if (typeof value !== 'string') return '';
+    const trimmed = value.trim();
+    if (!trimmed || trimmed === '/') return '';
+    if (!trimmed.startsWith('/') || trimmed.startsWith('//')) return '';
+    if (/[\r\n?#]/.test(trimmed)) return '';
+    const normalized = trimmed.replace(/\/+$/u, '');
+    if (!normalized) return '';
+    const segments = normalized.split('/');
+    if (segments.some(segment => segment === '.' || segment === '..')) return '';
+    return normalized;
+}
+
+export function stripBasePath(path, basePath) {
+    const normalizedBasePath = normalizeBasePath(basePath);
+    const targetPath = String(path || '');
+    if (!normalizedBasePath) {
+        return targetPath || '/';
+    }
+    if (targetPath === normalizedBasePath) {
+        return '/';
+    }
+    if (targetPath.startsWith(normalizedBasePath + '/')) {
+        return targetPath.slice(normalizedBasePath.length) || '/';
+    }
+    return targetPath || '/';
+}
+
+export function isPathWithinBasePath(path, basePath) {
+    const normalizedBasePath = normalizeBasePath(basePath);
+    const targetPath = String(path || '');
+    if (!normalizedBasePath) {
+        return targetPath.startsWith('/');
+    }
+    return targetPath === normalizedBasePath || targetPath.startsWith(normalizedBasePath + '/');
+}
+
+export function prefixInternalAssetPath(path, basePath) {
+    const normalizedBasePath = normalizeBasePath(basePath);
+    const targetPath = String(path || '');
+    if (!normalizedBasePath || !targetPath.startsWith('/__')) {
+        return targetPath;
+    }
+    return normalizedBasePath + targetPath;
+}
+
 /**
  * Parse pagination, sort, and search params from a query object with sane
  * defaults, integer clamping, and a sort allowlist. Returns the parsed values

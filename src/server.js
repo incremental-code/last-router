@@ -4,7 +4,14 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createElement, serialize } from '@incremental-code/last-act';
-import { buildRoute, makeBodySignals, matchPath, parseQuery } from './common.js';
+import {
+    buildRoute,
+    makeBodySignals,
+    matchPath,
+    normalizeBasePath,
+    parseQuery,
+    prefixInternalAssetPath,
+} from './common.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const MIME = {
@@ -162,7 +169,8 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
 
     const { route, params } = match;
     const query = parseQuery(url.search);
-    const router = serverRouter(path);
+    const basePath = getBasePath(req);
+    const router = serverRouter(path, basePath);
 
     let reqBody;
     try {
@@ -176,7 +184,7 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
     }
 
     const apiReq = buildApiRequest(req, path, params, query, reqBody);
-    const apiRes = createApiResponse();
+    const apiRes = createApiResponse(basePath);
 
     let body = {};
     try {
@@ -198,14 +206,14 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
     const appHtml = serialize(createElement(Page, { router, params, body: reactiveBody }));
 
     const manifest = routes.map(r => ({ pattern: r.pattern, params: r.params, dir: r.dir, hasApi: r.hasApi }));
-    const data = { path, params, body, manifest };
+    const data = { path, params, body, manifest, basePath };
 
     const headers = { 'content-type': 'text/html', ...apiRes.takeHeaders() };
     const cookies = withFlashClear(apiReq, apiRes.takeCookies());
     if (cookies.length) headers['set-cookie'] = cookies;
     apiRes.markSent();
     res.writeHead(apiRes.status() ?? 200, headers);
-    res.end(renderShell({ appHtml, importMap, data, head: body.head }));
+    res.end(renderShell({ appHtml, importMap, data, head: body.head, basePath }));
 }
 
 async function streamData(baseDir, path, url, req, res) {
@@ -219,6 +227,7 @@ async function streamData(baseDir, path, url, req, res) {
     const { route, params } = match;
     const query = parseQuery(url.search);
     const apiFn = await loadApi(baseDir, route);
+    const basePath = getBasePath(req);
 
     let reqBody;
     try {
@@ -232,7 +241,7 @@ async function streamData(baseDir, path, url, req, res) {
     }
 
     const apiReq = buildApiRequest(req, path, params, query, reqBody);
-    const apiRes = createApiResponse();
+    const apiRes = createApiResponse(basePath);
 
     if (!apiFn) {
         res.writeHead(200, {
@@ -387,7 +396,7 @@ async function readRequestBody(req) {
     return Object.fromEntries(new URLSearchParams(text));
 }
 
-function createApiResponse() {
+function createApiResponse(basePath) {
     let status = null;
     const headers = {};
     const cookies = [];
@@ -419,7 +428,7 @@ function createApiResponse() {
             }));
         },
         redirect(to, opts) {
-            throw new Redirect(to, !!(opts && opts.permanent));
+            throw new Redirect(toBrowserPath(to, basePath), !!(opts && opts.permanent));
         },
         status() { return status; },
         takeHeaders() { const h = headers; return { ...h }; },
@@ -444,32 +453,59 @@ function serializeCookie(name, value, opts = {}) {
     return parts.join('; ');
 }
 
-function serverRouter(path) {
+function serverRouter(path, basePath) {
     return {
         path,
-        push: target => { throw new Redirect(target); },
-        replace: target => { throw new Redirect(target, true); },
+        push: target => { throw new Redirect(toBrowserPath(target, basePath)); },
+        replace: target => { throw new Redirect(toBrowserPath(target, basePath), true); },
     };
 }
 
-function renderShell({ appHtml, importMap, data, head }) {
+function renderShell({ appHtml, importMap, data, head, basePath }) {
     const json = JSON.stringify(data).replaceAll('<', '\\u003c');
     const title = (head && typeof head.title === 'string' && head.title) || 'last-router';
+    const browserImportMap = prefixImportMap(importMap, basePath);
     return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${escapeHtml(title)}</title>
-<script type="importmap">${JSON.stringify({ imports: importMap })}</script>
+<script type="importmap">${JSON.stringify({ imports: browserImportMap })}</script>
 </head>
 <body>
 <div id="app">${appHtml}</div>
 <div id="__portal_root"></div>
 <script type="application/json" id="__last_router_data">${json}</script>
-<script type="module" src="/__router/client.js"></script>
+<script type="module" src="${escapeHtml(prefixInternalAssetPath('/__router/client.js', basePath))}"></script>
 </body>
 </html>`;
+}
+
+function prefixImportMap(importMap, basePath) {
+    return Object.fromEntries(
+        Object.entries(importMap).map(([key, value]) => [key, prefixInternalAssetPath(value, basePath)]),
+    );
+}
+
+function getBasePath(req) {
+    const header = req.headers['x-forwarded-prefix'];
+    if (Array.isArray(header)) {
+        return normalizeBasePath(header[0]);
+    }
+    return normalizeBasePath(header);
+}
+
+function toBrowserPath(target, basePath) {
+    const normalizedBasePath = normalizeBasePath(basePath);
+    const value = String(target || '');
+    if (!normalizedBasePath || !value.startsWith('/')) {
+        return value || '/';
+    }
+    if (value === normalizedBasePath || value.startsWith(normalizedBasePath + '/')) {
+        return value;
+    }
+    return `${normalizedBasePath}${value === '/' ? '' : value}`;
 }
 
 function escapeHtml(s) {

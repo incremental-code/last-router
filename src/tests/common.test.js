@@ -1,6 +1,15 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoute, matchPath, parseListParams, parseQuery } from '../common.js';
+import {
+    buildRoute,
+    isPathWithinBasePath,
+    matchPath,
+    normalizeBasePath,
+    parseListParams,
+    parseQuery,
+    prefixInternalAssetPath,
+    stripBasePath,
+} from '../common.js';
 
 describe('buildRoute', () => {
     it('builds the root route from no segments', () => {
@@ -96,6 +105,33 @@ describe('parseQuery', () => {
 
     it('decodes percent-encoded values', () => {
         assert.deepEqual(parseQuery('?q=hello%20world'), { q: 'hello world' });
+    });
+});
+
+describe('basePath helpers', () => {
+    it('normalizes safe forwarded prefixes and rejects invalid ones', () => {
+        assert.equal(normalizeBasePath('/blog/'), '/blog');
+        assert.equal(normalizeBasePath('/'), '');
+        assert.equal(normalizeBasePath('//blog'), '');
+        assert.equal(normalizeBasePath('/blog?x=1'), '');
+        assert.equal(normalizeBasePath('/blog/../admin'), '');
+    });
+
+    it('strips a base path from browser routes', () => {
+        assert.equal(stripBasePath('/blog/admin/posts/new', '/blog'), '/admin/posts/new');
+        assert.equal(stripBasePath('/blog', '/blog'), '/');
+        assert.equal(stripBasePath('/admin/posts/new', '/blog'), '/admin/posts/new');
+    });
+
+    it('detects whether a browser path stays within the configured base path', () => {
+        assert.equal(isPathWithinBasePath('/blog/admin', '/blog'), true);
+        assert.equal(isPathWithinBasePath('/blog', '/blog'), true);
+        assert.equal(isPathWithinBasePath('/card/admin', '/blog'), false);
+    });
+
+    it('prefixes internal asset paths without touching other imports', () => {
+        assert.equal(prefixInternalAssetPath('/__router/client.js', '/blog'), '/blog/__router/client.js');
+        assert.equal(prefixInternalAssetPath('/cdn/lib.js', '/blog'), '/cdn/lib.js');
     });
 });
 

@@ -92,6 +92,25 @@ describe('SSR', () => {
         assert.match(app, /&lt;script&gt;alert/);
         assert.doesNotMatch(app, /<script>alert/);
     });
+
+    it('prefixes shell assets and boot data when a forwarded prefix is present', async () => {
+        const html = await (await fetch(baseUrl + '/', {
+            headers: { 'x-forwarded-prefix': '/blog' },
+        })).text();
+        assert.match(html, /<script type="module" src="\/blog\/__router\/client\.js"><\/script>/);
+        assert.match(html, /"@incremental-code\/last-act":"\/blog\/__module\/@incremental-code\/last-act\/src\/index\.js"/);
+        const data = readData(html);
+        assert.equal(data.basePath, '/blog');
+    });
+
+    it('prefixes redirects when a forwarded prefix is present', async () => {
+        const res = await fetch(baseUrl + '/redirect', {
+            headers: { 'x-forwarded-prefix': '/blog' },
+            redirect: 'manual',
+        });
+        assert.equal(res.status, 302);
+        assert.equal(res.headers.get('location'), '/blog');
+    });
 });
 
 describe('/__data streaming', () => {
@@ -116,6 +135,13 @@ describe('/__data streaming', () => {
     it('emits a __redirect marker when api pushes', async () => {
         const text = await (await fetch(baseUrl + '/__data/redirect')).text();
         assert.match(text, /"__redirect":"\/"/);
+    });
+
+    it('prefixes streamed redirects when a forwarded prefix is present', async () => {
+        const text = await (await fetch(baseUrl + '/__data/redirect', {
+            headers: { 'x-forwarded-prefix': '/blog' },
+        })).text();
+        assert.match(text, /"__redirect":"\/blog"/);
     });
 
     it('flushes chunks incrementally rather than buffering', async () => {

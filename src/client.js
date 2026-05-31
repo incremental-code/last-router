@@ -1,21 +1,37 @@
 import { Signal } from 'signal-polyfill';
 import { createElement, mount, hydrate, onUnmount, effect } from '@incremental-code/last-act';
-import { makeBodySignals, matchPath } from '/__router/common.js';
+import {
+    isPathWithinBasePath,
+    makeBodySignals,
+    matchPath,
+    normalizeBasePath,
+    prefixInternalAssetPath,
+    stripBasePath,
+} from './common.js';
 
 const data = JSON.parse(document.getElementById('__last_router_data').textContent);
 const manifest = data.manifest;
 const appEl = document.getElementById('app');
+const basePath = normalizeBasePath(data.basePath);
 
 const path = new Signal.State(data.path);
 const router = {
     get path() { return path.get(); },
-    push(target) { history.pushState(null, '', target); navigate(target); },
-    replace(target) { history.replaceState(null, '', target); navigate(target); },
+    push(target) {
+        const resolved = resolveTarget(target);
+        history.pushState(null, '', resolved.browserTarget);
+        navigate(resolved);
+    },
+    replace(target) {
+        const resolved = resolveTarget(target);
+        history.replaceState(null, '', resolved.browserTarget);
+        navigate(resolved);
+    },
 };
 
 let currentBody = null;
 
-window.addEventListener('popstate', () => navigate(location.pathname + location.search));
+window.addEventListener('popstate', () => navigate(resolveTarget(location.pathname + location.search + location.hash)));
 window.addEventListener('click', interceptLinks);
 
 await hydrateInitial();
@@ -32,9 +48,18 @@ async function hydrateInitial() {
 }
 
 async function navigate(target) {
-    path.set(target);
-    const match = matchPath(manifest, target);
-    if (!match) return;
+    const resolved = typeof target === 'string' ? resolveTarget(target) : target;
+    if (!resolved.withinBasePath) {
+        window.location.assign(resolved.browserTarget);
+        return;
+    }
+
+    path.set(resolved.appPath);
+    const match = matchPath(manifest, resolved.appPath);
+    if (!match) {
+        window.location.assign(resolved.browserTarget);
+        return;
+    }
 
     currentBody = null;
 
@@ -42,7 +67,7 @@ async function navigate(target) {
     const ownBody = {};
     let response;
     try {
-        response = await fetch('/__data' + target, { signal: controller.signal });
+        response = await fetch(assetPath('/__data' + resolved.dataTarget), { signal: controller.signal });
     } catch (err) {
         if (err.name !== 'AbortError') console.error(err);
         return;
@@ -102,7 +127,7 @@ function streamInto(target, node, { skipFirstChunk } = {}) {
     (async () => {
         let response;
         try {
-            response = await fetch('/__data' + target, { signal: controller.signal });
+            response = await fetch(assetPath('/__data' + target), { signal: controller.signal });
         } catch (err) {
             if (err.name !== 'AbortError') console.error(err);
             return;
@@ -148,7 +173,7 @@ function streamInto(target, node, { skipFirstChunk } = {}) {
 
 async function loadPage(route) {
     const dir = route.dir ? route.dir + '/' : '';
-    const mod = await import(`/__src/${dir}page.js`);
+    const mod = await import(assetPath(`/__src/${dir}page.js`));
     return mod.default;
 }
 
@@ -179,7 +204,41 @@ function interceptLinks(event) {
     const anchor = event.target.closest('a[href]');
     if (!anchor) return;
     const href = anchor.getAttribute('href');
-    if (!href || href.startsWith('http') || href.startsWith('//') || anchor.target === '_blank') return;
+    if (!href || href.startsWith('#') || href.startsWith('http') || href.startsWith('//') || anchor.target === '_blank') return;
+    const resolved = resolveTarget(anchor.href);
+    if (!resolved.withinBasePath) return;
     event.preventDefault();
-    router.push(href);
+    router.push(resolved.browserTarget);
+}
+
+function assetPath(path) {
+    return prefixInternalAssetPath(path, basePath);
+}
+
+function resolveTarget(target) {
+    const stringTarget = String(target || '');
+    const url = new URL(stringTarget, window.location.href);
+    if (url.origin !== window.location.origin) {
+        return {
+            browserTarget: url.href,
+            appPath: stripBasePath(url.pathname, basePath),
+            dataTarget: stripBasePath(url.pathname, basePath) + url.search,
+            withinBasePath: false,
+        };
+    }
+    const browserTarget = stringTarget.startsWith('/') && !isPathWithinBasePath(url.pathname, basePath)
+        ? `${basePath}${url.pathname === '/' ? '' : url.pathname}${url.search}${url.hash}`
+        : url.pathname + url.search + url.hash;
+    return resolveBrowserPath(browserTarget);
+}
+
+function resolveBrowserPath(browserTarget) {
+    const url = new URL(browserTarget, window.location.origin);
+    const withinBasePath = isPathWithinBasePath(url.pathname, basePath);
+    return {
+        browserTarget: url.pathname + url.search + url.hash,
+        appPath: stripBasePath(url.pathname, basePath),
+        dataTarget: stripBasePath(url.pathname, basePath) + url.search,
+        withinBasePath,
+    };
 }
