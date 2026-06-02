@@ -66,7 +66,7 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
 
             return renderPage(baseDir, importMap, path, url, req, res);
         } catch (err) {
-            console.error(err);
+            logRouterError('request failed', err, { method: req?.method, url: req?.url });
             res.writeHead(500, { 'content-type': 'text/plain' });
             res.end(`Internal Server Error: ${err.message}`);
         }
@@ -121,6 +121,8 @@ async function loadPage(baseDir, route) {
 
 const SSR_DRAIN_MS = 1000;
 const MAX_BODY_BYTES = 1024 * 1024; // ~1MB cap on parsed request body
+const FORM_URLENCODED = 'application/x-www-form-urlencoded';
+const JSON_CONTENT_TYPE = 'application/json';
 
 async function runApi(apiFn, req, res) {
     const body = {};
@@ -174,9 +176,10 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
 
     let reqBody;
     try {
-        reqBody = await readRequestBody(req);
+        reqBody = await readRequestBody(req, path);
     } catch (err) {
         if (err && err.code === 'PAYLOAD_TOO_LARGE') {
+            logRouterWarning('payload too large', { method: req?.method, path });
             res.writeHead(413, { 'content-type': 'text/plain' });
             return res.end('Payload Too Large');
         }
@@ -231,9 +234,10 @@ async function streamData(baseDir, path, url, req, res) {
 
     let reqBody;
     try {
-        reqBody = await readRequestBody(req);
+        reqBody = await readRequestBody(req, path);
     } catch (err) {
         if (err && err.code === 'PAYLOAD_TOO_LARGE') {
+            logRouterWarning('payload too large', { method: req?.method, path });
             res.writeHead(413, { 'content-type': 'text/plain' });
             return res.end('Payload Too Large');
         }
@@ -366,11 +370,14 @@ function parseCookies(header) {
     return out;
 }
 
-async function readRequestBody(req) {
+async function readRequestBody(req, path = '') {
     const method = (req.method || 'GET').toUpperCase();
     if (method === 'GET' || method === 'HEAD') return null;
     const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
-    if (contentType !== 'application/json' && contentType !== 'application/x-www-form-urlencoded') {
+    if (contentType !== JSON_CONTENT_TYPE && contentType !== FORM_URLENCODED) {
+        if (requestMayHaveBody(req)) {
+            logRouterWarning('unsupported request content-type; body ignored', { method, path, contentType });
+        }
         // Drain so the connection isn't left half-read, but don't expose the bytes.
         req.resume();
         return null;
@@ -390,10 +397,22 @@ async function readRequestBody(req) {
     if (total === 0) return null;
     const text = Buffer.concat(chunks).toString('utf8');
 
-    if (contentType === 'application/json') {
-        try { return JSON.parse(text); } catch { return null; }
+    if (contentType === JSON_CONTENT_TYPE) {
+        try {
+            return JSON.parse(text);
+        } catch {
+            logRouterWarning('invalid JSON body; body ignored', { method, path });
+            return null;
+        }
     }
     return Object.fromEntries(new URLSearchParams(text));
+}
+
+function requestMayHaveBody(req) {
+    const contentLength = req.headers['content-length'];
+    const transferEncoding = req.headers['transfer-encoding'];
+    const declaredLength = Number(Array.isArray(contentLength) ? contentLength[0] : contentLength);
+    return declaredLength > 0 || Boolean(transferEncoding);
 }
 
 function createApiResponse(basePath) {
@@ -574,4 +593,26 @@ function notFound(res) {
 
 function isAsyncIterable(x) {
     return !!x && typeof x[Symbol.asyncIterator] === 'function';
+}
+
+function logRouterWarning(event, context = {}) {
+    console.warn(`[last-router] ${event}`, context);
+}
+
+function logRouterError(event, err, context = {}) {
+    console.error(`[last-router] ${event}`, {
+        ...context,
+        error: serializeError(err),
+    });
+}
+
+function serializeError(err) {
+    if (!err || typeof err !== 'object') {
+        return { message: String(err || '') };
+    }
+    return {
+        name: err.name || 'Error',
+        message: err.message || '',
+        stack: err.stack || '',
+    };
 }
