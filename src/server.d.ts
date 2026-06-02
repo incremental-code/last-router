@@ -27,23 +27,18 @@ export type Params = Record<string, string>;
 export type Query = Record<string, string>;
 export type Body = Record<string, any>;
 
-/**
- * A read-write signal — the shape of every top-level body field. Compatible
- * with `Signal.State<T>` from signal-polyfill; declared structurally here so
- * consumers don't have to import signal-polyfill just to type pages.
- */
+/** @deprecated Pages now receive plain body values, not signals. */
 export interface BodySignal<T> {
     get(): T;
     set(value: T): void;
 }
 
 /**
- * The body shape pages actually receive. Each top-level field is wrapped in
- * a signal so SSR and client hydration use the same access pattern, and so
- * streamed `yield` chunks can update the page reactively on the client.
+ * The body shape pages receive. Top-level fields are plain values while
+ * remaining reactive under the hood when streamed chunks update them.
  */
 export type ReactiveBody<B extends Body> = {
-    [K in keyof B]: BodySignal<B[K]>;
+    [K in keyof B]: B[K];
 };
 
 export interface PageProps<P extends Params = Params, B extends Body = Body> {

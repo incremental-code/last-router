@@ -186,19 +186,17 @@ async function loadPage(route) {
 
 function mergeIntoSignals(signals, chunk) {
     for (const [k, v] of Object.entries(chunk)) {
-        if (signals[k]) signals[k].set(v);
-        else signals[k] = new Signal.State(v);
+        signals[k] = v;
     }
 }
 
 /**
- * If body has a `head` signal carrying { title, ... }, mirror its title into
- * document.title. Cleans up when the mounted node unmounts.
+ * Mirror `body.head.title` into document.title and keep it in sync as streamed
+ * body chunks update `head`.
  */
 function attachTitleEffect(body, node) {
-    if (!Object.hasOwn(body, 'head')) return;
     const stop = effect(() => {
-        const head = body.head.get();
+        const head = body.head;
         const title = head && typeof head.title === 'string' ? head.title : null;
         if (title) document.title = title;
     });

@@ -168,8 +168,9 @@ function clampInt(value, fallback, min, max) {
 }
 
 /**
- * Wrap top-level body fields in Signal.State and lazily create missing keys so
- * pages can safely read `body.someField.get()` before streaming updates arrive.
+ * Keep top-level body fields as internal Signal.State values but expose a plain
+ * value view to pages. This lets page components read `body.someField` while
+ * still getting reactive updates from streamed chunks.
  */
 export function makeBodySignals(body) {
     const signals = {};
@@ -177,15 +178,26 @@ export function makeBodySignals(body) {
         signals[key] = new Signal.State(value);
     }
 
-    return new Proxy(signals, {
+    const ensureSignal = (property) => {
+        if (!(property in signals)) {
+            signals[property] = new Signal.State(undefined);
+        }
+        return signals[property];
+    };
+
+    return new Proxy({}, {
         get(target, property, receiver) {
             if (typeof property !== 'string') {
                 return Reflect.get(target, property, receiver);
             }
-            if (!(property in target)) {
-                target[property] = new Signal.State(undefined);
+            return ensureSignal(property).get();
+        },
+        set(_target, property, value) {
+            if (typeof property !== 'string') {
+                return false;
             }
-            return target[property];
+            ensureSignal(property).set(value);
+            return true;
         },
     });
 }
