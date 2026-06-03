@@ -62,11 +62,16 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
             if (path === '/__router/common.js') return sendFile(join(HERE, 'common.js'), res);
             if (path.startsWith('/__module/')) return serveUnder(findNodeModules(baseDir), path.slice('/__module/'.length), res);
             if (path.startsWith('/__src/')) return serveUnder(baseDir, path.slice('/__src/'.length), res);
-            if (path.startsWith('/__data')) return streamData(baseDir, path.slice('/__data'.length) || '/', url, req, res);
+            if (path.startsWith('/__data')) return await streamData(baseDir, path.slice('/__data'.length) || '/', url, req, res);
 
-            return renderPage(baseDir, importMap, path, url, req, res);
+            return await renderPage(baseDir, importMap, path, url, req, res);
         } catch (err) {
             logRouterError('request failed', err, { method: req?.method, url: req?.url });
+            if (res.writableEnded) return;
+            if (res.headersSent) {
+                res.end();
+                return;
+            }
             res.writeHead(500, { 'content-type': 'text/plain' });
             res.end(`Internal Server Error: ${err.message}`);
         }

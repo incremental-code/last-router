@@ -93,6 +93,12 @@ describe('SSR', () => {
         assert.doesNotMatch(app, /<script>alert/);
     });
 
+    it('returns 500 when a page api rejects', async () => {
+        const res = await fetch(baseUrl + '/danger?boom=1');
+        assert.equal(res.status, 500);
+        assert.match(await res.text(), /Internal Server Error: danger route failed/);
+    });
+
     it('prefixes shell assets and boot data when a forwarded prefix is present', async () => {
         const html = await (await fetch(baseUrl + '/', {
             headers: { 'x-forwarded-prefix': '/blog' },
@@ -160,6 +166,12 @@ describe('/__data streaming', () => {
     it('returns 404 for unknown data paths', async () => {
         const res = await fetch(baseUrl + '/__data/no/such/route');
         assert.equal(res.status, 404);
+    });
+
+    it('returns 500 when a data api rejects', async () => {
+        const res = await fetch(baseUrl + '/__data/danger?boom=1');
+        assert.equal(res.status, 500);
+        assert.match(await res.text(), /Internal Server Error: danger route failed/);
     });
 });
 
