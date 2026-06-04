@@ -119,7 +119,20 @@ async function navigate(target) {
             }
         }
     } catch (err) {
-        if (err.name !== 'AbortError') console.error(err);
+        if (err.name !== 'AbortError') {
+            if (!mountedNode) {
+                console.error(
+                    `[last-router] navigate(): failed to render and mount route "${resolved.appPath}" before DOM swap. ` +
+                    'Effect: previous route content remains visible because appEl.replaceChildren() was not reached.',
+                );
+            } else {
+                console.error(
+                    `[last-router] navigate(): failed while processing streamed data for route "${resolved.appPath}" after mount. ` +
+                    'Effect: page may be partially updated until the next navigation.',
+                );
+            }
+            console.error(err);
+        }
     }
 }
 
