@@ -59,6 +59,38 @@ export default async function* ({ params }) {
 On the server, the api is drained and the merged body is rendered to HTML.
 On the client, each yielded chunk arrives as an NDJSON line and updates the body reactively.
 
+## API-only routes
+
+A folder with an `api.js` but no `page.js` is registered as a JSON endpoint. The
+api's default export runs and its return value is serialized directly as JSON —
+no HTML rendering. This works for any HTTP method:
+
+```js
+// src/api/uploads/api.js  →  /api/uploads
+export default async function ({ method, files }) {
+    if (method !== 'POST') {
+        return { error: 'Method not allowed.' };
+    }
+    // ...
+    return { url: '/uploads/abc.png' };
+}
+```
+
+## File uploads — req.files
+
+`multipart/form-data` requests are parsed automatically. Each uploaded file is
+available on `req.files` keyed by field name, alongside the regular `req.body`
+fields:
+
+```js
+export default async function ({ files }) {
+    const file = files.image; // { name, type, data }
+    // file.data is a Buffer
+}
+```
+
+Uploads are capped at 20MB per request. Non-file fields remain on `req.body`.
+
 ## router
 
 ```
@@ -68,6 +100,19 @@ router.replace(path)  // history.replaceState + navigate
 ```
 
 On the server, `push` and `replace` throw a redirect that becomes a 302.
+
+## Static files
+
+`createServer({ staticDirs })` serves files from disk before file-system routing:
+
+```js
+createServer({
+    staticDirs: [{ path: '/uploads', dir: './uploads' }],
+});
+```
+
+Requests under `path` are served from `dir`. Used by `last-server` to expose
+uploaded files.
 
 ## Built-in health route
 

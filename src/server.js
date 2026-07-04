@@ -48,9 +48,13 @@ export function parseListParams(query, { defaults = {}, allowedSorts = [] } = {}
     return { page, perPage, sort, dir, q };
 }
 
-export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
+export function createServer({ port = 3000, base = 'src', imports = {}, staticDirs = [] } = {}) {
     const baseDir = resolve(process.cwd(), base);
     const importMap = { ...defaultImports(baseDir), ...imports };
+    const resolvedStaticDirs = staticDirs.map(({ path: urlPath, dir }) => ({
+        urlPath: urlPath.endsWith('/') ? urlPath : `${urlPath}/`,
+        dir: resolve(process.cwd(), dir),
+    }));
 
     const handler = async (req, res) => {
         try {
@@ -62,6 +66,13 @@ export function createServer({ port = 3000, base = 'src', imports = {} } = {}) {
             if (path === '/__router/common.js') return sendFile(join(HERE, 'common.js'), res);
             if (path.startsWith('/__module/')) return serveUnder(findNodeModules(baseDir), path.slice('/__module/'.length), res);
             if (path.startsWith('/__src/')) return serveUnder(baseDir, path.slice('/__src/'.length), res);
+
+            for (const { urlPath, dir } of resolvedStaticDirs) {
+                if (path === urlPath.slice(0, -1) || path.startsWith(urlPath)) {
+                    return serveUnder(dir, path.slice(urlPath.length), res);
+                }
+            }
+
             if (path.startsWith('/__data')) return await streamData(baseDir, path.slice('/__data'.length) || '/', url, req, res);
 
             return await renderPage(baseDir, importMap, path, url, req, res);
@@ -96,9 +107,12 @@ async function scanRoutes(baseDir) {
     const routes = [];
     async function walk(dir, segments) {
         const entries = await readdir(dir, { withFileTypes: true });
-        if (entries.some(e => e.isFile() && e.name === 'page.js')) {
+        const hasPage = entries.some(e => e.isFile() && e.name === 'page.js');
+        const hasApi = entries.some(e => e.isFile() && e.name === 'api.js');
+        if (hasPage || hasApi) {
             const route = buildRoute(segments);
-            route.hasApi = entries.some(e => e.isFile() && e.name === 'api.js');
+            route.hasApi = hasApi;
+            route.hasPage = hasPage;
             routes.push(route);
         }
         for (const entry of entries) {
@@ -128,6 +142,8 @@ const SSR_DRAIN_MS = 1000;
 const MAX_BODY_BYTES = 1024 * 1024; // ~1MB cap on parsed request body
 const FORM_URLENCODED = 'application/x-www-form-urlencoded';
 const JSON_CONTENT_TYPE = 'application/json';
+const MULTIPART_CONTENT_TYPE = 'multipart/form-data';
+const MAX_MULTIPART_BYTES = 20 * 1024 * 1024; // 20MB cap for multipart uploads
 
 async function runApi(apiFn, req, res) {
     const body = {};
@@ -193,6 +209,29 @@ async function renderPage(baseDir, importMap, path, url, req, res) {
 
     const apiReq = buildApiRequest(req, path, params, query, reqBody);
     const apiRes = createApiResponse(basePath);
+
+    // API-only routes (no page.js) return JSON directly
+    if (!route.hasPage) {
+        try {
+            const apiFn = await loadApi(baseDir, route);
+            const jsonBody = apiFn ? await runApi(apiFn, apiReq, apiRes) : {};
+            const headers = { 'content-type': 'application/json', ...apiRes.takeHeaders() };
+            const cookies = withFlashClear(apiReq, apiRes.takeCookies());
+            if (cookies.length) headers['set-cookie'] = cookies;
+            apiRes.markSent();
+            res.writeHead(apiRes.status() ?? 200, headers);
+            return res.end(JSON.stringify(jsonBody ?? null));
+        } catch (err) {
+            if (err instanceof Redirect) {
+                const headers = { location: err.path };
+                const cookies = withFlashClear(apiReq, apiRes.takeCookies());
+                if (cookies.length) headers['set-cookie'] = cookies;
+                res.writeHead(err.permanent ? 301 : 302, headers);
+                return res.end();
+            }
+            throw err;
+        }
+    }
 
     let body = {};
     try {
@@ -310,12 +349,20 @@ const FLASH_COOKIE = '_flash';
 
 function buildApiRequest(req, path, params, query, body) {
     const cookies = parseCookies(req.headers.cookie);
+    let files = {};
+    let cleanBody = body;
+    if (body && typeof body === 'object' && Object.prototype.hasOwnProperty.call(body, '__files')) {
+        files = body.__files || {};
+        const { __files: _ignored, ...rest } = body;
+        cleanBody = rest;
+    }
     return {
         method: req.method,
         path,
         params,
         query,
-        body,
+        body: cleanBody,
+        files,
         headers: copyHeaders(req.headers),
         cookies,
         flash: readFlash(cookies),
@@ -375,10 +422,109 @@ function parseCookies(header) {
     return out;
 }
 
+function extractBoundary(contentType) {
+    const match = /;\s*boundary=("?)([^";\s]+)\1/i.exec(contentType);
+    return match ? match[2] : null;
+}
+
+function indexOfBuffer(haystack, needle, offset = 0) {
+    const limit = haystack.length - needle.length;
+    outer: for (let i = offset; i <= limit; i++) {
+        for (let j = 0; j < needle.length; j++) {
+            if (haystack[i + j] !== needle[j]) continue outer;
+        }
+        return i;
+    }
+    return -1;
+}
+
+function parseMultipartParts(buffer, boundary) {
+    const fields = {};
+    const files = {};
+    const crlfBuf = Buffer.from('\r\n');
+    const crlfcrlfBuf = Buffer.from('\r\n\r\n');
+    const firstDelimiter = Buffer.from(`--${boundary}`);
+    const innerDelimiter = Buffer.concat([crlfBuf, firstDelimiter]);
+
+    let pos = indexOfBuffer(buffer, firstDelimiter, 0);
+    if (pos === -1) return { fields, files };
+    pos += firstDelimiter.length;
+
+    while (pos < buffer.length) {
+        // After boundary: \r\n (part continues) or -- (end marker)
+        if (buffer[pos] === 45 && buffer[pos + 1] === 45) break;
+        if (buffer[pos] !== 13 || buffer[pos + 1] !== 10) break;
+        pos += 2;
+
+        const headerEnd = indexOfBuffer(buffer, crlfcrlfBuf, pos);
+        if (headerEnd === -1) break;
+
+        const headerText = buffer.slice(pos, headerEnd).toString('latin1');
+        pos = headerEnd + 4;
+
+        const nextBoundary = indexOfBuffer(buffer, innerDelimiter, pos);
+        const dataEnd = nextBoundary === -1 ? buffer.length : nextBoundary;
+        const data = buffer.slice(pos, dataEnd);
+
+        const headers = {};
+        for (const line of headerText.split('\r\n')) {
+            const colon = line.indexOf(':');
+            if (colon < 0) continue;
+            headers[line.slice(0, colon).toLowerCase().trim()] = line.slice(colon + 1).trim();
+        }
+
+        const disposition = headers['content-disposition'] || '';
+        const nameMatch = /\bname="([^"]*)"/.exec(disposition);
+        const filenameMatch = /\bfilename="([^"]*)"/.exec(disposition);
+        const fieldName = nameMatch ? nameMatch[1] : null;
+        const fileName = filenameMatch ? filenameMatch[1] : null;
+        const partContentType = headers['content-type'] || '';
+
+        if (fieldName !== null) {
+            if (fileName !== null) {
+                files[fieldName] = { name: fileName, type: partContentType || 'application/octet-stream', data };
+            } else {
+                fields[fieldName] = data.toString('utf8');
+            }
+        }
+
+        if (nextBoundary === -1) break;
+        pos = nextBoundary + innerDelimiter.length;
+    }
+
+    return { fields, files };
+}
+
 async function readRequestBody(req, path = '') {
     const method = (req.method || 'GET').toUpperCase();
     if (method === 'GET' || method === 'HEAD') return null;
-    const contentType = (req.headers['content-type'] || '').split(';')[0].trim().toLowerCase();
+    const rawContentType = req.headers['content-type'] || '';
+    const contentType = rawContentType.split(';')[0].trim().toLowerCase();
+
+    if (contentType === MULTIPART_CONTENT_TYPE) {
+        const boundary = extractBoundary(rawContentType);
+        if (!boundary) {
+            logRouterWarning('multipart/form-data missing boundary; body ignored', { method, path });
+            req.resume();
+            return null;
+        }
+        let total = 0;
+        const chunks = [];
+        for await (const chunk of req) {
+            total += chunk.length;
+            if (total > MAX_MULTIPART_BYTES) {
+                const err = new Error('Payload Too Large');
+                err.code = 'PAYLOAD_TOO_LARGE';
+                throw err;
+            }
+            chunks.push(chunk);
+        }
+        if (total === 0) return null;
+        const buffer = Buffer.concat(chunks);
+        const { fields, files } = parseMultipartParts(buffer, boundary);
+        return Object.keys(files).length > 0 ? { ...fields, __files: files } : { ...fields };
+    }
+
     if (contentType !== JSON_CONTENT_TYPE && contentType !== FORM_URLENCODED) {
         if (requestMayHaveBody(req)) {
             logRouterWarning('unsupported request content-type; body ignored', { method, path, contentType });
@@ -485,10 +631,18 @@ function serverRouter(path, basePath) {
     };
 }
 
+function buildAnalyticsScript() {
+    const src = process.env.UMAMI_SCRIPT_URL;
+    const websiteId = process.env.UMAMI_WEBSITE_ID;
+    if (!src || !websiteId) return '';
+    return `<script defer src="${escapeHtml(src)}" data-website-id="${escapeHtml(websiteId)}"></script>`;
+}
+
 function renderShell({ appHtml, importMap, data, head, basePath }) {
     const json = JSON.stringify(data).replaceAll('<', '\\u003c');
     const title = (head && typeof head.title === 'string' && head.title) || 'last-router';
     const browserImportMap = prefixImportMap(importMap, basePath);
+    const analyticsScript = buildAnalyticsScript();
     return `<!doctype html>
 <html lang="en">
 <head>
@@ -496,7 +650,7 @@ function renderShell({ appHtml, importMap, data, head, basePath }) {
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>${escapeHtml(title)}</title>
 <script type="importmap">${JSON.stringify({ imports: browserImportMap })}</script>
-</head>
+${analyticsScript ? analyticsScript + '\n' : ''}</head>
 <body>
 <div id="app">${appHtml}</div>
 <div id="__portal_root"></div>
