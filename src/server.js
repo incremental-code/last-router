@@ -22,6 +22,13 @@ const MIME = {
     '.json': 'application/json',
     '.map': 'application/json',
     '.svg': 'image/svg+xml',
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.gif': 'image/gif',
+    '.webp': 'image/webp',
+    '.avif': 'image/avif',
+    '.ico': 'image/x-icon',
 };
 
 class Redirect {
