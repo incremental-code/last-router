@@ -3,6 +3,8 @@
 An isomorphic file-system router for the [last-act](../last-act) ecosystem.
 Zero build step, one HTTP server, signals over the wire.
 
+**Deploy to AWS Lambda** — See [LAMBDA.md](./LAMBDA.md) for server-side rendering on Lambda.
+
 ## API
 
 ```

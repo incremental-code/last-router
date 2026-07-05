@@ -14,6 +14,10 @@
     "./common": {
       "types": "./src/common.d.ts",
       "default": "./src/common.js"
+    },
+    "./lambda": {
+      "types": "./src/lambda.ts",
+      "default": "./src/lambda.ts"
     }
   },
   "scripts": {
