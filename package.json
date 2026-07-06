@@ -17,7 +17,7 @@
     },
     "./lambda": {
       "types": "./src/lambda.ts",
-      "default": "./src/lambda.ts"
+      "default": "./src/lambda.js"
     }
   },
   "scripts": {
@@ -34,6 +34,7 @@
     "signal-polyfill": "^0.2.2"
   },
   "devDependencies": {
+    "esbuild": "^0.28.1",
     "signal-polyfill": "^0.2.2"
   }
 }
