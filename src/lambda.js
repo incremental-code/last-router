@@ -1,15 +1,24 @@
 var __defProp = Object.defineProperty;
 var __defNormalProp = (obj, key, value) => key in obj ? __defProp(obj, key, { enumerable: true, configurable: true, writable: true, value }) : obj[key] = value;
 var __publicField = (obj, key, value) => __defNormalProp(obj, typeof key !== "symbol" ? key + "" : key, value);
-import { readdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { readFile, readdir } from "node:fs/promises";
+import { extname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createElement, serialize } from "@incremental-code/last-act";
 import {
   buildRoute,
   makeBodySignals,
-  matchPath
+  matchPath,
+  normalizeBasePath
 } from "./common.js";
+import {
+  HERE,
+  MIME,
+  defaultImports,
+  findNodeModules,
+  renderShell,
+  resolveSafe
+} from "./shell.js";
 class Redirect extends Error {
   constructor(path, permanent = false) {
     super("Redirect");
@@ -80,6 +89,12 @@ function createApiResponse() {
         httpOnly: true,
         sameSite: "lax"
       }));
+    },
+    redirect(to, opts) {
+      // Mirrors the dev server's res.redirect: throw a Redirect so the handler
+      // stops the api and emits a 301/302 (with any cookies set so far). Apis
+      // rely on this aborting — e.g. `if (!session) res.redirect('/signin')`.
+      throw new Redirect(to, !!(opts && opts.permanent));
     },
     status() {
       return status;
@@ -225,12 +240,34 @@ function formatHeaders(headers) {
   }
   return out;
 }
+function lowerHeaderKeys(headers) {
+  const out = {};
+  for (const [name, value] of Object.entries(headers)) {
+    out[name.toLowerCase()] = value;
+  }
+  return out;
+}
+// API Gateway proxy (payload format 1.0) requires every `headers` value to be a
+// string, so repeated Set-Cookie headers must travel in `multiValueHeaders`.
+// Putting an array under `headers['set-cookie']` makes API Gateway reject the
+// whole response with a 500 — silently breaking every cookie-setting flow
+// (sessions, sign-in/out, flash). Spread the result into the response object.
+function cookieHeaders(cookies) {
+  return cookies && cookies.length ? { multiValueHeaders: { "set-cookie": cookies } } : {};
+}
 function createLambdaHandler(options = {}) {
   const baseDir = resolve(process.cwd(), options.base || "src");
+  const importMap = { ...defaultImports(baseDir), ...(options.imports || {}) };
   return async (event) => {
     try {
+      // Normalize header keys to lowercase once. API Gateway proxy events (REST
+      // v1 and HTTP API payload format 1.0) deliver headers with their original
+      // case (e.g. `Cookie`, `Content-Type`), but the adapter and app read them
+      // lowercase (`event.headers.cookie`). Without this, cookies never parse and
+      // sessions silently fail (every members-area route bounces to sign-in).
+      if (event.headers) event.headers = lowerHeaderKeys(event.headers);
       const path = event.path || "/";
-      const method = event.httpMethod || "GET";
+      const basePath = getBasePath(event);
       if (path === "/health") {
         return {
           statusCode: 200,
@@ -238,6 +275,16 @@ function createLambdaHandler(options = {}) {
           body: JSON.stringify({ status: "ok" })
         };
       }
+      // Hydration runtime + assets. These mirror the prefixes last-router's dev
+      // server exposes (server.js), so a page rendered here boots the client
+      // bundle, resolves bare specifiers via the inline import map, and hydrates
+      // #app exactly as it does under `last-server`.
+      if (path === "/__router/client.js") return serveAsset(join(HERE, "client.js"));
+      if (path === "/__router/common.js") return serveAsset(join(HERE, "common.js"));
+      if (path.startsWith("/__module/")) return serveUnder(findNodeModules(baseDir), path.slice("/__module/".length));
+      if (path.startsWith("/__src/")) return serveUnder(baseDir, path.slice("/__src/".length));
+      if (path.startsWith("/__data")) return handleData(baseDir, path.slice("/__data".length) || "/", event, basePath);
+
       const routes = await scanRoutes(baseDir);
       const match = matchPath(routes, path);
       if (!match) {
@@ -249,22 +296,7 @@ function createLambdaHandler(options = {}) {
       }
       const { route, params } = match;
       const query = formatQuery(event.queryStringParameters);
-      let reqBody = null;
-      if (method !== "GET" && method !== "HEAD" && event.body) {
-        try {
-          const bodyStr = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString() : event.body;
-          const contentType = (event.headers["content-type"] || "").toLowerCase();
-          if (contentType.includes("application/json")) {
-            reqBody = JSON.parse(bodyStr);
-          } else if (contentType.includes("application/x-www-form-urlencoded")) {
-            reqBody = Object.fromEntries(new URLSearchParams(bodyStr));
-          } else {
-            reqBody = bodyStr;
-          }
-        } catch {
-          reqBody = event.body;
-        }
-      }
+      const reqBody = parseEventBody(event);
       const apiReq = buildApiRequest(event, path, params, query, reqBody);
       const apiRes = createApiResponse();
       if (!route.hasPage) {
@@ -276,25 +308,21 @@ function createLambdaHandler(options = {}) {
             ...apiRes.takeHeaders()
           });
           const cookies2 = withFlashClear(apiReq, apiRes.takeCookies());
-          if (cookies2.length) {
-            headers2["set-cookie"] = cookies2;
-          }
           apiRes.markSent();
           return {
             statusCode: apiRes.status() ?? 200,
             headers: headers2,
+            ...cookieHeaders(cookies2),
             body: JSON.stringify(jsonBody ?? null)
           };
         } catch (err) {
           if (err instanceof Redirect) {
             const headers2 = formatHeaders({ location: err.path });
             const cookies2 = withFlashClear(apiReq, apiRes.takeCookies());
-            if (cookies2.length) {
-              headers2["set-cookie"] = cookies2;
-            }
             return {
               statusCode: err.permanent ? 301 : 302,
               headers: headers2,
+              ...cookieHeaders(cookies2),
               body: ""
             };
           }
@@ -309,12 +337,10 @@ function createLambdaHandler(options = {}) {
         if (err instanceof Redirect) {
           const headers2 = formatHeaders({ location: err.path });
           const cookies2 = withFlashClear(apiReq, apiRes.takeCookies());
-          if (cookies2.length) {
-            headers2["set-cookie"] = cookies2;
-          }
           return {
             statusCode: err.permanent ? 301 : 302,
             headers: headers2,
+            ...cookieHeaders(cookies2),
             body: ""
           };
         }
@@ -332,20 +358,18 @@ function createLambdaHandler(options = {}) {
         dir: r.dir,
         hasApi: r.hasApi
       }));
-      const data = { path, params, body, manifest };
+      const data = { path, params, body, manifest, basePath };
       const headers = formatHeaders({
         "content-type": "text/html",
         ...apiRes.takeHeaders()
       });
       const cookies = withFlashClear(apiReq, apiRes.takeCookies());
-      if (cookies.length) {
-        headers["set-cookie"] = cookies;
-      }
       apiRes.markSent();
-      const html = renderShell({ appHtml, data });
+      const html = renderShell({ appHtml, importMap, data, head: body.head, basePath });
       return {
         statusCode: apiRes.status() ?? 200,
         headers,
+        ...cookieHeaders(cookies),
         body: html
       };
     } catch (err) {
@@ -380,24 +404,147 @@ function lambdaRouter(path) {
     }
   };
 }
-function renderShell({ appHtml, data }) {
-  const json = JSON.stringify(data).replaceAll("<", "\\u003c");
-  return `<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${data.body?.head?.title || "App"}</title>
-    ${data.body?.head?.styles || ""}
-</head>
-<body>
-    <div id="app">${appHtml}</div>
-    <script>
-        window.__ROUTE_DATA__ = ${json};
-    <\/script>
-    ${data.body?.head?.scripts || ""}
-</body>
-</html>`;
+function getBasePath(event) {
+  const headers = event.headers || {};
+  let value = headers["x-forwarded-prefix"];
+  if (value === void 0) {
+    for (const [name, headerValue] of Object.entries(headers)) {
+      if (name.toLowerCase() === "x-forwarded-prefix") {
+        value = headerValue;
+        break;
+      }
+    }
+  }
+  if (Array.isArray(value)) value = value[0];
+  return normalizeBasePath(value);
+}
+function parseEventBody(event) {
+  const method = event.httpMethod || "GET";
+  if (method === "GET" || method === "HEAD" || !event.body) return null;
+  try {
+    const bodyStr = event.isBase64Encoded ? Buffer.from(event.body, "base64").toString() : event.body;
+    const headers = event.headers || {};
+    const contentType = (headers["content-type"] || headers["Content-Type"] || "").toLowerCase();
+    if (contentType.includes("application/json")) {
+      return JSON.parse(bodyStr);
+    }
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+      return Object.fromEntries(new URLSearchParams(bodyStr));
+    }
+    return bodyStr;
+  } catch {
+    return event.body;
+  }
+}
+function isTextType(type) {
+  return type.startsWith("text/") || type === "application/json" || type === "image/svg+xml";
+}
+async function serveAsset(absPath) {
+  try {
+    const data = await readFile(absPath);
+    const type = MIME[extname(absPath)] || "application/octet-stream";
+    const isText = isTextType(type);
+    return {
+      statusCode: 200,
+      headers: {
+        "content-type": type,
+        "cache-control": "public, max-age=3600"
+      },
+      body: isText ? data.toString("utf8") : data.toString("base64"),
+      isBase64Encoded: !isText
+    };
+  } catch {
+    return {
+      statusCode: 404,
+      headers: { "content-type": "text/plain" },
+      body: "Not Found"
+    };
+  }
+}
+async function serveUnder(base, sub) {
+  const resolved = resolveSafe(base, sub);
+  if (!resolved) {
+    return {
+      statusCode: 404,
+      headers: { "content-type": "text/plain" },
+      body: "Not Found"
+    };
+  }
+  return serveAsset(resolved);
+}
+// Buffered equivalent of server.js's `/__data` NDJSON stream. Lambda can't hold a
+// long-lived stream open, so we drain the api (async iterables up to SSR_DRAIN_MS,
+// same budget the page render uses) and return every chunk as one NDJSON line. The
+// client merges them exactly as it would from the live dev-server stream.
+async function handleData(baseDir, dataPath, event, basePath) {
+  const ndjson = { "content-type": "application/x-ndjson", "cache-control": "no-store" };
+  const routes = await scanRoutes(baseDir);
+  const match = matchPath(routes, dataPath);
+  if (!match) {
+    return { statusCode: 404, headers: ndjson, body: "" };
+  }
+  const { route, params } = match;
+  const query = formatQuery(event.queryStringParameters);
+  const reqBody = parseEventBody(event);
+  const apiReq = buildApiRequest(event, dataPath, params, query, reqBody);
+  const apiRes = createApiResponse();
+  const apiFn = await loadApi(baseDir, route);
+
+  if (!apiFn) {
+    return { statusCode: 200, headers: ndjson, body: JSON.stringify({}) + "\n" };
+  }
+
+  const finish = (chunks) => {
+    const headers = formatHeaders({ ...ndjson, ...apiRes.takeHeaders() });
+    const cookies = withFlashClear(apiReq, apiRes.takeCookies());
+    apiRes.markSent();
+    return {
+      statusCode: apiRes.status() ?? 200,
+      headers,
+      ...cookieHeaders(cookies),
+      body: chunks.map((chunk) => JSON.stringify(chunk)).join("\n") + "\n"
+    };
+  };
+
+  try {
+    const result = apiFn(apiReq, apiRes);
+    if (isAsyncIterable(result)) {
+      const chunks = await drainChunks(result, SSR_DRAIN_MS);
+      return finish(chunks.length ? chunks : [{}]);
+    }
+    const value = await result;
+    return finish([value ?? {}]);
+  } catch (err) {
+    if (err instanceof Redirect) {
+      return { statusCode: 200, headers: ndjson, body: JSON.stringify({ __redirect: err.path }) + "\n" };
+    }
+    throw err;
+  }
+}
+// Like drainForSsr, but keeps each yielded chunk as its own NDJSON line instead of
+// merging them, so streamed apis reach the client as discrete updates.
+async function drainChunks(iterable, timeoutMs) {
+  const iter = iterable[Symbol.asyncIterator]();
+  const deadline = Date.now() + timeoutMs;
+  const chunks = [];
+  try {
+    while (true) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      const next = iter.next();
+      const timer = new Promise((resolve2) => setTimeout(() => resolve2("__ssr_timeout"), remaining));
+      const winner = await Promise.race([next, timer]);
+      if (winner === "__ssr_timeout") break;
+      if (winner.done) break;
+      if (winner.value) chunks.push(winner.value);
+    }
+  } finally {
+    if (typeof iter.return === "function") {
+      await iter.return().catch(() => {
+      });
+    }
+  }
+  return chunks;
 }
 export {
   createLambdaHandler

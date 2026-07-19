@@ -1,8 +1,7 @@
 import { createServer as createHttpServer } from 'node:http';
 import { readFile, readdir } from 'node:fs/promises';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, extname, join, resolve, sep } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { extname, join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { createElement, serialize } from '@incremental-code/last-act';
 import {
     buildRoute,
@@ -10,26 +9,8 @@ import {
     matchPath,
     normalizeBasePath,
     parseQuery,
-    prefixInternalAssetPath,
 } from './common.js';
-
-const HERE = dirname(fileURLToPath(import.meta.url));
-const MIME = {
-    '.js': 'text/javascript',
-    '.mjs': 'text/javascript',
-    '.css': 'text/css',
-    '.html': 'text/html',
-    '.json': 'application/json',
-    '.map': 'application/json',
-    '.svg': 'image/svg+xml',
-    '.jpg': 'image/jpeg',
-    '.jpeg': 'image/jpeg',
-    '.png': 'image/png',
-    '.gif': 'image/gif',
-    '.webp': 'image/webp',
-    '.avif': 'image/avif',
-    '.ico': 'image/x-icon',
-};
+import { HERE, MIME, defaultImports, findNodeModules, renderShell, resolveSafe } from './shell.js';
 
 class Redirect {
     constructor(path, permanent = false) {
@@ -638,41 +619,6 @@ function serverRouter(path, basePath) {
     };
 }
 
-function buildAnalyticsScript() {
-    const src = process.env.UMAMI_SCRIPT_URL;
-    const websiteId = process.env.UMAMI_WEBSITE_ID;
-    if (!src || !websiteId) return '';
-    return `<script defer src="${escapeHtml(src)}" data-website-id="${escapeHtml(websiteId)}"></script>`;
-}
-
-function renderShell({ appHtml, importMap, data, head, basePath }) {
-    const json = JSON.stringify(data).replaceAll('<', '\\u003c');
-    const title = (head && typeof head.title === 'string' && head.title) || 'last-router';
-    const browserImportMap = prefixImportMap(importMap, basePath);
-    const analyticsScript = buildAnalyticsScript();
-    return `<!doctype html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>${escapeHtml(title)}</title>
-<script type="importmap">${JSON.stringify({ imports: browserImportMap })}</script>
-${analyticsScript ? analyticsScript + '\n' : ''}</head>
-<body>
-<div id="app">${appHtml}</div>
-<div id="__portal_root"></div>
-<script type="application/json" id="__last_router_data">${json}</script>
-<script type="module" src="${escapeHtml(prefixInternalAssetPath('/__router/client.js', basePath))}"></script>
-</body>
-</html>`;
-}
-
-function prefixImportMap(importMap, basePath) {
-    return Object.fromEntries(
-        Object.entries(importMap).map(([key, value]) => [key, prefixInternalAssetPath(value, basePath)]),
-    );
-}
-
 function getBasePath(req) {
     const header = req.headers['x-forwarded-prefix'];
     if (Array.isArray(header)) {
@@ -693,14 +639,6 @@ function toBrowserPath(target, basePath) {
     return `${normalizedBasePath}${value === '/' ? '' : value}`;
 }
 
-function escapeHtml(s) {
-    return String(s)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;');
-}
-
 function sendHealth(res) {
     res.writeHead(200, {
         'content-type': 'text/plain; charset=utf-8',
@@ -709,35 +647,9 @@ function sendHealth(res) {
     res.end('ok');
 }
 
-function defaultImports(baseDir) {
-    const nm = findNodeModules(baseDir);
-    if (!nm) return {};
-    const imports = {};
-    for (const pkg of ['@incremental-code/last-act', 'signal-polyfill']) {
-        const pkgJsonPath = join(nm, pkg, 'package.json');
-        if (!existsSync(pkgJsonPath)) continue;
-        const meta = JSON.parse(readFileSync(pkgJsonPath, 'utf8'));
-        const entry = meta.module || meta.main || 'index.js';
-        imports[pkg] = '/__module/' + pkg + '/' + entry;
-    }
-    return imports;
-}
-
-function findNodeModules(start) {
-    let dir = start;
-    while (true) {
-        const candidate = join(dir, 'node_modules');
-        if (existsSync(candidate)) return candidate;
-        const parent = dirname(dir);
-        if (parent === dir) return null;
-        dir = parent;
-    }
-}
-
 async function serveUnder(base, sub, res) {
-    if (!base) return notFound(res);
-    const resolved = resolve(base, decodeURIComponent(sub));
-    if (resolved !== base && !resolved.startsWith(base + sep)) return notFound(res);
+    const resolved = resolveSafe(base, sub);
+    if (!resolved) return notFound(res);
     return sendFile(resolved, res);
 }
 
