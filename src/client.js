@@ -207,7 +207,8 @@ function streamInto(target, node, { skipFirstChunk } = {}) {
 }
 
 async function loadPage(route) {
-    const dir = route.dir ? route.dir + '/' : '';
+    // Encode segments: API Gateway rejects raw `[`/`]` from `[param]` folders with a 400.
+    const dir = route.dir ? route.dir.split('/').map(encodeURIComponent).join('/') + '/' : '';
     const mod = await import(assetPath(`/__src/${dir}page.js`));
     return mod.default;
 }
