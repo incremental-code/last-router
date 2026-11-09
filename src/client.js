@@ -36,7 +36,16 @@ let currentBody = null;
 // `--last-router-progress`, so sites that don't want it are wholly unaffected.
 const progress = createProgress();
 
-window.addEventListener('popstate', () => navigate(resolveTarget(location.pathname + location.search + location.hash)));
+// The page on screen, as pathname + search. A popstate that leaves these alone
+// changed only the hash — a same-page #anchor jump, or Back across one. The
+// browser has already scrolled; refetching would remount the page and throw
+// away anything typed into it.
+let renderedLocation = location.pathname + location.search;
+
+window.addEventListener('popstate', () => {
+    if (location.pathname + location.search === renderedLocation) return;
+    navigate(resolveTarget(location.pathname + location.search + location.hash));
+});
 window.addEventListener('click', interceptLinks);
 
 await hydrateInitial();
@@ -67,6 +76,8 @@ async function navigate(target) {
     }
 
     path.set(resolved.appPath);
+    const rendered = new URL(resolved.browserTarget, location.origin);
+    renderedLocation = rendered.pathname + rendered.search;
     const match = matchPath(manifest, resolved.appPath);
     if (!match) {
         window.location.assign(resolved.browserTarget);
